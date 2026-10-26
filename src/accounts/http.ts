@@ -27,12 +27,15 @@ import {
 } from './pages';
 import { ATTEMPT_LIMITS, AttemptLimiter, type Window } from './rate-limit';
 import { pageLang, type PageLang } from './page-strings';
+import type { EmailLog } from './email-log';
 import type { BillingService } from './billing';
 import { AccountError, KEY_PREFIX, normalizeEmail, type AccountService, type User } from './service';
 import { audioSecondsOf, llmTokensOf, wavSeconds, type Counter, type Counters, type UsageMeter } from './usage';
 
 const BODY_MAX = 16 * 1024;
 const BODY_TIMEOUT_MS = 15_000;
+/** Letras faladas por segundo, a média que o site usa para vender "5 h de dublagem" por plano. */
+const DUB_CHARS_PER_SECOND = 14;
 
 const API_HEADERS = { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer' };
 
@@ -40,8 +43,8 @@ const API_HEADERS = { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'no
 const METERED: Record<string, { counter?: Counter; metrics: QuotaMetric[] }> = {
   '/v1/chat/completions': { counter: 'llmRequests', metrics: ['llmTokens'] },
   '/v1/audio/transcriptions': { counter: 'sttRequests', metrics: ['audioSeconds'] },
-  '/v1/audio/speech': { counter: 'ttsRequests', metrics: ['ttsChars'] },
-  '/v1/rooms': { metrics: ['rooms'] },
+  '/v1/audio/speech': { counter: 'ttsRequests', metrics: ['ttsChars', 'ttsSeconds'] },
+  '/v1/rooms': { metrics: [] }, // sala não é cota mensal: é 1 ativa por vez (o serviço de salas recusa a segunda)
   '/v1/s2s': { metrics: ['audioSeconds', 'llmTokens', 'ttsChars'] },
   '/v1/realtime/sessions': { metrics: ['audioSeconds', 'llmTokens', 'ttsChars'] },
 };
@@ -146,6 +149,7 @@ export interface AccountsHttpOptions {
   sessionRequests?: () => number;
   /** Stripe billing; null while STRIPE_SECRET_KEY is unset (no plan routes, no plan limits). */
   billing?: BillingService | null;
+  emailLog?: EmailLog;
 }
 
 export function createAccountsHttp(opts: AccountsHttpOptions) {
@@ -199,7 +203,7 @@ export function createAccountsHttp(opts: AccountsHttpOptions) {
     if (isCrossSite(req, siteHosts)) throw new AccountError(403, 'Pedido de outra origem recusado.', 'cross_site');
   }
 
-  const meView = (user: User) => ({ email: user.email, plan: user.plan, createdAt: new Date(user.createdAt).toISOString(), downloadUrl: cfg.downloadUrl, admin: service.isAdminUser(user), emailVerified: !user.emailUnverified, billing: Boolean(billing) });
+  const meView = (user: User) => ({ email: user.email, plan: service.effectivePlan(user), createdAt: new Date(user.createdAt).toISOString(), downloadUrl: cfg.downloadUrl, admin: service.isAdminUser(user), emailVerified: !user.emailUnverified, billing: Boolean(billing) });
 
   async function api(req: IncomingMessage, res: ServerResponse, method: string, path: string): Promise<void> {
     const ip = RateLimiter.clientIp(req);
@@ -209,7 +213,7 @@ export function createAccountsHttp(opts: AccountsHttpOptions) {
         sameSiteForm(req);
         limit(`signup:ip:${ip}`, ATTEMPT_LIMITS.signupPerIp);
         const body = await readJson(req);
-        const { user, session } = await service.signup(body.email, body.password, links(req).lang);
+        const { user, session } = await service.signup(body.email, body.password, links(req).lang, body.invite);
         send(res, 201, { ...meView(user), csrfToken: session.csrf }, { 'Set-Cookie': cookie(session.token, Math.floor(cfg.sessionTtlMs / 1000)) });
         return;
       }
@@ -266,6 +270,47 @@ export function createAccountsHttp(opts: AccountsHttpOptions) {
         await service.rememberLanguage(w.user, requestLang(req));
         await service.sendVerification(w.user);
         send(res, 200, { ok: true });
+        return;
+      }
+      case 'GET /v1/account/emails': {
+        const w = who(req, false);
+        if (!service.isAdminUser(w.user)) throw new AccountError(403, 'Esta área é só da administração.', 'not_admin');
+        send(res, 200, { emails: opts.emailLog?.list(Number(new URL(req.url ?? '/', 'http://x').searchParams.get('limit') ?? 50) || 50) ?? [] });
+        return;
+      }
+      case 'GET /v1/account/invite': {
+        limit(`invite:ip:${ip}`, ATTEMPT_LIMITS.couponPerIp);
+        send(res, 200, service.inviteInfo(new URL(req.url ?? '/', 'http://x').searchParams.get('code')));
+        return;
+      }
+      case 'GET /v1/account/coupons': {
+        const w = who(req, false);
+        if (!service.isAdminUser(w.user)) throw new AccountError(403, 'Esta área é só da administração.', 'not_admin');
+        send(res, 200, { coupons: service.listCoupons() });
+        return;
+      }
+      case 'POST /v1/account/coupons': {
+        const w = writer(req);
+        if (!service.isAdminUser(w.user)) throw new AccountError(403, 'Esta área é só da administração.', 'not_admin');
+        limit(`admin:ip:${ip}`, ATTEMPT_LIMITS.resetPerIp);
+        const body = await readJson(req);
+        send(res, 201, await service.issueCoupons(body, body.emails, mailLang(body.lang, links(req).lang)));
+        return;
+      }
+      case 'POST /v1/account/coupons/send': {
+        const w = writer(req);
+        if (!service.isAdminUser(w.user)) throw new AccountError(403, 'Esta área é só da administração.', 'not_admin');
+        limit(`admin:ip:${ip}`, ATTEMPT_LIMITS.resetPerIp);
+        const body = await readJson(req);
+        send(res, 200, { ok: true, email: await service.sendCoupon(body.code, body.email, mailLang(body.lang, links(req).lang)) });
+        return;
+      }
+      case 'POST /v1/account/coupon/redeem': {
+        const w = writer(req);
+        limit(`coupon:ip:${ip}`, ATTEMPT_LIMITS.couponPerIp);
+        const body = await readJson(req);
+        await service.redeemCoupon(w.user, body.code);
+        send(res, 200, { ...meView(w.user), quota: service.quotaView(w.user) });
         return;
       }
       case 'POST /v1/account/billing/checkout': {
@@ -363,7 +408,19 @@ export function createAccountsHttp(opts: AccountsHttpOptions) {
         const body = await readJson(req);
         const { user } = await service.activate(body.key, body.deviceName, body.appVersion);
         const q = service.quotaView(user);
-        send(res, 200, { ok: true, email: user.email, plan: user.plan, quota: { limits: q.limits, month: q.month, monthResetsAt: q.monthResetsAt } });
+        send(res, 200, {
+          ok: true,
+          email: user.email,
+          // O plano EFETIVO (o cupom conta): /me e /activate dizem o mesmo.
+          plan: q.plan,
+          quota: {
+            limits: q.limits,
+            month: q.month,
+            monthResetsAt: q.monthResetsAt,
+            ...(q.viaCoupon ? { viaCoupon: true, grantEndsAt: q.grantEndsAt } : {}),
+            ...(q.planRenewsAt ? { planRenewsAt: q.planRenewsAt, planCancelsAtPeriodEnd: q.planCancelsAtPeriodEnd } : {}),
+          },
+        });
         return;
       }
       default: break;
@@ -371,6 +428,8 @@ export function createAccountsHttp(opts: AccountsHttpOptions) {
     req.resume();
     throw new AccountError(404, 'Rota não encontrada.', 'not_found');
   }
+
+  const mailLang = (raw: unknown, fallback: PageLang): PageLang => (raw === 'pt' || raw === 'en' || raw === 'fr' ? raw : fallback);
 
   const requestLang = (req: IncomingMessage): PageLang | undefined =>
     parseCookies(req.headers.cookie).get('ucast_lang') || req.headers['accept-language'] ? links(req).lang : undefined;
@@ -411,12 +470,20 @@ export function createAccountsHttp(opts: AccountsHttpOptions) {
   const inFlight = new Map<string, number>();
 
   function gate(req: IncomingMessage, res: ServerResponse, method: string, path: string): boolean {
+    if (path === '/v1/rooms') delete req.headers['x-ucast-account'];
     if (method !== 'POST') return false;
     const metered = METERED[path];
     const bearer = bearerToken(req.headers.authorization);
     if (!metered || !bearer.startsWith(KEY_PREFIX)) return false;
+    const peeked = service.keyPeek(bearer);
+    const busy = peeked ? service.sessionBusy(peeked) : null;
+    if (busy) { req.resume(); sendError(res, busy); return true; }
     const found = service.keyOf(bearer);
     if (!found) return false; // the proxy answers 401
+    // A sala nasce com a conta que a criou: é o que o serviço de salas usa
+    // para valer "uma sala ao vivo por vez" por conta.
+    if (path === '/v1/rooms') req.headers['x-ucast-account'] = found.user.id;
+    if (busy) { req.resume(); sendError(res, busy); return true; }
     const internal = isInternalSubrequest(req.headers[SUBREQUEST_HEADER], req.socket?.remoteAddress);
     const requests = path === '/v1/realtime/sessions' ? Math.max(1, opts.sessionRequests?.() ?? 1) : 1;
     if (!internal) {
@@ -477,8 +544,12 @@ export function createAccountsHttp(opts: AccountsHttpOptions) {
     if (e.kind === 'stt') delta.audioSeconds = audioSecondsOf(e.rawBody, e.response);
     else if (e.kind === 'chat') delta.llmTokens = llmTokensOf(fields, e.response);
     else if (e.kind === 'tts') {
-      delta.ttsChars = typeof fields.input === 'string' ? fields.input.length : 0;
-      if (Buffer.isBuffer(e.response)) delta.ttsSeconds = wavSeconds(e.response) ?? 0;
+      const chars = typeof fields.input === 'string' ? fields.input.length : 0;
+      delta.ttsChars = chars;
+      // O tempo de voz sai do WAV quando ele veio inteiro; numa resposta em fluxo (o caso normal da dublagem) o
+      // gateway só repassa os bytes e o tempo vem dos caracteres falados, a mesma conta que o plano usa.
+      const fromWav = Buffer.isBuffer(e.response) ? wavSeconds(e.response) : null;
+      delta.ttsSeconds = fromWav ?? Math.round(chars / DUB_CHARS_PER_SECOND);
     } else return;
     usage.record(found.user.id, found.key.id, delta);
   }
@@ -494,6 +565,9 @@ export function createAccountsHttp(opts: AccountsHttpOptions) {
   } | null {
     const bearer = bearerToken(authorization);
     if (!bearer.startsWith(KEY_PREFIX)) return null;
+    const peeked = service.keyPeek(bearer);
+    const busy = peeked ? service.sessionBusy(peeked) : null;
+    if (busy) return { denial: denialOf(busy) };
     const found = service.keyOf(bearer);
     if (!found) return null;
     const refused = service.checkQuota(found.user, ['audioSeconds']);

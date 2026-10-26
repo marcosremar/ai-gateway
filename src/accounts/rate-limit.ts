@@ -14,6 +14,7 @@ export const ATTEMPT_LIMITS = {
   verifyPerIp: { limit: 30, windowMs: 60 * 60_000 },
   verifyResendPerUser: { limit: 3, windowMs: 60 * 60_000 },
   deletePerUser: { limit: 5, windowMs: 15 * 60_000 },
+  couponPerIp: { limit: 20, windowMs: 60 * 60_000 },
 } as const satisfies Record<string, Window>;
 
 export class AttemptLimiter {

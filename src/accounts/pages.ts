@@ -18,7 +18,6 @@ const esc = (s: string) => s.replace(/[&<>"']/g, c => HTML_ESCAPES[c] ?? c);
 const js = (v: unknown) => JSON.stringify(v).replace(/</g, '\\u003c');
 
 const ICON = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='16' fill='%234cc3cb'/%3E%3Ccircle cx='16' cy='16' r='9.33' fill='none' stroke='%230a1012' stroke-width='4'/%3E%3C/svg%3E";
-const DUB_CHARS_PER_SECOND = 14;
 const LOGO_MARK = '<svg viewBox="0 0 32 32" aria-hidden="true" focusable="false"><circle cx="16" cy="16" r="16" fill="#4cc3cb"/><circle cx="16" cy="16" r="9.33" fill="none" stroke="#0a1012" stroke-width="4"/></svg>';
 
 /** The logo always goes to the public landing page, even on the account hosts. */
@@ -94,6 +93,13 @@ input:-webkit-autofill{-webkit-box-shadow:0 0 0 40px var(--screen) inset;-webkit
 .plan ul{list-style:none;margin:6px 0 10px;padding:0;color:var(--ink-2);font-size:.9rem;flex:1}
 .plan li{padding:3px 0}
 .plan .btn{width:100%}
+#cpf input[type=number]{width:5.5rem;flex:none}
+textarea{width:100%;background:var(--screen);border:1px solid var(--hairline-2);border-radius:3px;padding:12px;font:inherit;color:inherit;resize:vertical}
+#cpi{margin:12px 0}
+.mailtext{white-space:pre-wrap;overflow-wrap:anywhere;background:var(--screen);border:1px solid var(--hairline);border-radius:3px;padding:12px;margin:8px 0 0;font-size:.85rem;color:var(--ink-2)}
+.mailtext a{color:var(--phos)}
+.mini{display:flex;flex-direction:column;gap:2px;font-size:.8rem;color:var(--ink-3)}
+#cpf{align-items:flex-end}
 .linkish{background:none;border:0;padding:0;color:var(--ink-3);font-size:.86rem;text-decoration:underline;text-underline-offset:3px;cursor:pointer}
 .linkish:hover{color:var(--ink)}
 .quiet{margin-top:28px}
@@ -226,13 +232,16 @@ export function signupPage(links: PageLinks): RenderedPage {
 if(n&&n.charAt(0)==='/'&&n.indexOf('//')<0&&(n==='/account'||n.indexOf('/account/')===0||n==='/desktop'||n.indexOf('/desktop?')===0||n.indexOf('/account/desktop')===0))return n;
 return ${js(links.account)}+location.search}`;
   return formPage(t.signupTitle, t.signupHeading, t.signupLead,
-    `${emailField(links)}${passwordField(links, t.password, 'new-password', 'minlength="8" required aria-describedby="ph"')}<p id="ph" class="hint">${t.minLength}</p>`,
+    `<div id="inv" class="msg" role="status" aria-live="polite"></div>${emailField(links)}${passwordField(links, t.password, 'new-password', 'minlength="8" required aria-describedby="ph"')}<p id="ph" class="hint">${t.minLength}</p>`,
     t.signupButton, `${t.haveAccount} <a href="${esc(links.login)}">${t.signIn}</a>`,
-    `(function(){${after};var f=$('f'),b=$('b'),m=$('m');toAccountIfSignedIn(afterAuth());f.addEventListener('submit',function(e){e.preventDefault();show(m,'');
+    `(function(){${after};var f=$('f'),b=$('b'),m=$('m'),INVITE=new URLSearchParams(location.search).get('invite');toAccountIfSignedIn(afterAuth());
+if(INVITE)api('/v1/account/invite?code='+encodeURIComponent(INVITE),'GET').then(function(r){if(!r.ok){INVITE=null;show($('inv'),errText(r));return}
+show($('inv'),fill(L.inviteBanner,{n:r.body.months}),'ok');document.querySelector('h1').textContent=L.inviteHeading;
+if(r.body.email){$('email').value=r.body.email;$('email').readOnly=true;$('password').focus()}});f.addEventListener('submit',function(e){e.preventDefault();show(m,'');
 var email=$('email').value.trim(),pw=$('password').value;
 if(!email||email.indexOf('@')<1){show(m,L.invalidEmail);$('email').focus();return}
 if(pw.length<8){show(m,L.shortPassword);$('password').focus();return}
-busy(b,true,L.creating);api('/v1/account/signup','POST',{email:email,password:pw}).then(function(r){
+busy(b,true,L.creating);api('/v1/account/signup','POST',INVITE?{email:email,password:pw,invite:INVITE}:{email:email,password:pw}).then(function(r){
 if(r.ok){location.href=afterAuth();return}busy(b,false,L.signupButton);show(m,errText(r))},function(){busy(b,false,L.signupButton);show(m,L.offline)})})})();`,
     links, setupChain(links));
 }
@@ -330,6 +339,9 @@ export function dashboardPage(links: PageLinks): RenderedPage {
 </ol></section>
 <section class="card" aria-labelledby="uh"><h2 id="uh">${t.usageHeading}</h2><p class="hint" id="plan"></p>
 <div class="grid" id="stats"></div></section>
+<section class="card" aria-labelledby="ch"><h2 id="ch">${t.couponHeading}</h2><p class="hint">${t.couponHint}</p>
+<form id="cf" class="row"><input id="cc" type="text" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="40" placeholder="UCAST-XXXX-XXXX" aria-label="${esc(t.couponHeading)}"><button id="cb" class="btn" type="submit">${t.client.couponButton}</button></form>
+<div id="cm" class="msg" role="status" aria-live="polite"></div></section>
 <section class="card" id="billing" aria-labelledby="bh" hidden><h2 id="bh">${t.client.planHeading}</h2><p class="hint" id="bp"></p>
 <div id="bm" class="msg" role="status" aria-live="polite"></div>
 <div class="plans" id="plans"></div>
@@ -339,14 +351,28 @@ export function dashboardPage(links: PageLinks): RenderedPage {
 <h3>${t.usersHeading}</h3><p class="hint">${t.usersHint}</p>
 <label class="sr" for="uq">${t.searchUser}</label><input id="uq" type="text" placeholder="${esc(t.searchPlaceholder)}" autocomplete="off">
 <div id="um" class="msg" role="alert" aria-live="polite"></div>
-<ul id="users" class="users" aria-label="${esc(t.usersHeading)}"></ul></section>
+<ul id="users" class="users" aria-label="${esc(t.usersHeading)}"></ul>
+<h3>${t.couponsHeading}</h3><p class="hint">${t.couponsHint}</p>
+<div class="row"><label class="mini"><span>${t.couponDuration}</span><select id="cpm">${[3, 6, 12].map(n => `<option value="${n}">${t.client.couponMonthsOf.replace('{n}', String(n))}</option>`).join('')}</select></label>
+<label class="mini"><span>${t.couponLang}</span><select id="cpl">${(['pt', 'en', 'fr'] as const).map(l => `<option value="${l}"${links.lang === l ? ' selected' : ''}>${{ pt: 'Português', en: 'English', fr: 'Français' }[l]}</option>`).join('')}</select></label></div>
+<form id="cpi" class="stack"><label class="sr" for="cpe">${t.couponInviteLabel}</label><textarea id="cpe" rows="3" placeholder="${esc(t.couponInvitePlaceholder)}" autocomplete="off" spellcheck="false"></textarea>
+<button id="cpb" class="btn" type="submit">${t.client.couponInvite}</button></form>
+<div id="cam" class="msg" role="status" aria-live="polite"></div>
+<details class="quiet"><summary>${t.couponMore}</summary>
+<form id="cpf" class="row"><label class="mini"><span>${t.couponCount}</span><input id="cpn" type="number" min="1" max="500" value="1"></label>
+<label class="mini"><span>${t.couponMaxUses}</span><input id="cpu" type="number" min="1" max="100000" value="1"></label>
+<input id="cpt" type="text" maxlength="80" placeholder="${esc(t.couponNote)}" aria-label="${esc(t.couponNote)}">
+<button id="cpg" class="btn ghost" type="submit">${t.client.couponCreate}</button></form></details>
+<ul id="coupons" class="users" aria-label="${esc(t.couponsHeading)}"></ul>
+<h3>${t.emailsHeading}</h3><p class="hint">${t.emailsHint}</p>
+<ul id="mails" class="users" aria-label="${esc(t.emailsHeading)}"></ul></section>
 <details class="quiet"><summary>${t.accountSettings}</summary>
 <section class="card" aria-labelledby="xh"><h2 id="xh">${t.deleteHeading}</h2><p class="hint">${t.deleteHint}</p>
 <form id="xf" class="row"><label class="sr" for="xpw">${t.deletePassword}</label>
 <input id="xpw" type="password" autocomplete="current-password" placeholder="${esc(t.deletePassword)}" required>
 <button id="xb" class="btn danger" type="submit">${t.deleteButton}</button></form>
 <div id="xm" class="msg" role="alert" aria-live="polite"></div></section></details>`;
-  const plans = Object.values(PLANS).map(p => ({ id: p.id, price: p.priceCents / 100, hours: p.quota.audioSeconds / 3600, dubMinutes: Math.round(p.quota.ttsChars / DUB_CHARS_PER_SECOND / 60), rooms: p.quota.rooms }));
+  const plans = Object.values(PLANS).map(p => ({ id: p.id, price: p.priceCents / 100, hours: p.quota.audioSeconds / 3600, dubMinutes: Math.round(p.quota.ttsSeconds / 60), rooms: p.quota.rooms }));
   const script = `(function(){
 var gm=$('gm'),km=$('km'),ADMIN=false,BILLING=false,PLAN='free',PLANS=${js(plans)},WANT=new URLSearchParams(location.search).get('plan');
 function minutes(s){return (s/60).toLocaleString(L.locale,{maximumFractionDigits:s<600?1:0})}
@@ -378,22 +404,22 @@ ul.appendChild(li)})}
 function loadKeys(){return api('/v1/account/keys').then(function(r){if(r.ok)renderKeys(r.body.keys||[])})}
 function loadUsage(){return api('/v1/account/usage?days=30').then(function(r){if(!r.ok)return;var u=r.body,q=u.quota,mo=q.month;
 var lim=q.limits;PLAN=q.plan;
-$('plan').textContent=(BILLING?(L.planNames[q.plan]||q.plan):(q.plan==='free'?L.freePlan:q.plan))+' · '+L.renewsOn+' '+day(q.monthResetsAt);
+$('plan').textContent=(BILLING?(L.planNames[q.plan]||q.plan):(q.plan==='free'?L.freePlan:q.plan))+' · '+L.renewsOn+' '+day(q.monthResetsAt)+(q.viaCoupon?' · '+L.couponUntil+' '+day(q.grantEndsAt):'');
 var s=$('stats');s.textContent='';
 s.appendChild(stat(L.minutesSubtitled,minutes(mo.audioSeconds),'min',lim.audioSeconds>0?hours(lim.audioSeconds/3600):''));
-s.appendChild(stat(L.minutesDubbed,minutes(mo.ttsSeconds||0),'min',lim.ttsChars>0?dubbing(Math.round(lim.ttsChars/${DUB_CHARS_PER_SECOND}/60)):''));
+s.appendChild(stat(L.minutesDubbed,minutes(mo.ttsSeconds||0),'min',lim.ttsSeconds>0?dubbing(Math.round(lim.ttsSeconds/60)):''));
 s.appendChild(stat(L.liveRooms,n(mo.rooms),'',lim.rooms>0?n(lim.rooms):''));
-var used=Math.max(lim.audioSeconds>0?mo.audioSeconds/lim.audioSeconds:0,lim.ttsChars>0?mo.ttsChars/lim.ttsChars:0,lim.rooms>0?mo.rooms/lim.rooms:0);
+var used=Math.max(lim.audioSeconds>0?mo.audioSeconds/lim.audioSeconds:0,lim.ttsSeconds>0?(mo.ttsSeconds||0)/lim.ttsSeconds:0,lim.rooms>0?mo.rooms/lim.rooms:0);
 if(BILLING&&used>=0.8){var order=['free','pro','events'];WANT=WANT||order[order.indexOf(q.plan)+1]||null}
 if(BILLING)renderPlans(q);
 if(BILLING&&used>=1)show($('bm'),L.limitReached);else if(BILLING&&used>=0.8)show($('bm'),fill(L.limitNear,{p:Math.floor(used*100)}));
 if(!ADMIN)return;var tb=$('days').tBodies[0];tb.textContent='';u.days.slice().reverse().forEach(function(d){if(!d.requests&&!d.rooms)return;var tr=document.createElement('tr');
-[new Date(d.day+'T12:00:00Z').toLocaleDateString(L.locale),minutes(d.audioSeconds)+' min',n(d.llmTokens),n(d.ttsChars),n(d.rooms),n(d.requests)].forEach(function(t){var td=document.createElement('td');td.textContent=t;tr.appendChild(td)});tb.appendChild(tr)});
+[new Date(d.day+'T12:00:00Z').toLocaleDateString(L.locale),minutes(d.audioSeconds)+' min',n(d.llmTokens),minutes(d.ttsSeconds||0)+' min',n(d.rooms),n(d.requests)].forEach(function(t){var td=document.createElement('td');td.textContent=t;tr.appendChild(td)});tb.appendChild(tr)});
 if(!tb.rows.length){var tr=document.createElement('tr');var td=document.createElement('td');td.colSpan=6;td.className='meta';td.textContent=L.noUsage;tr.appendChild(td);tb.appendChild(tr)}})}
 function hours(h){return n(h)+' h'}
 function dubbing(m){return m>=60?n(m/60)+' h':n(m)+' min'}
 function money(v){return v.toLocaleString(L.locale,{style:'currency',currency:'EUR',maximumFractionDigits:v%1?2:0})}
-function renderPlans(q){$('billing').hidden=false;var box=$('plans');box.textContent='';var paid=q.plan!=='free';
+function renderPlans(q){$('billing').hidden=false;var box=$('plans');box.textContent='';var paid=q.plan!=='free'&&!q.viaCoupon;
 $('bp').textContent=q.planRenewsAt?fill(q.planCancelsAtPeriodEnd?L.endsOn:L.subscriptionRenewsOn,{date:day(q.planRenewsAt)}):'';
 $('manage').hidden=!paid;
 PLANS.forEach(function(p){var card=document.createElement('div');card.className='plan'+(p.id===q.plan?' current':p.id===WANT?' wanted':'');
@@ -424,14 +450,61 @@ busy(b,true,L.sending);api('/v1/account/users/'+encodeURIComponent(u.id)+'/acces
 if(r.ok){show(um,fill(L.keySent,{email:u.email}),'ok')}else{show(um,errText(r))}},function(){busy(b,false,L.sendNewKey);show(um,L.offline)})});
 li.appendChild(b);ul.appendChild(li)})}
 $('uq').addEventListener('input',drawUsers);
+$('cf').addEventListener('submit',function(e){e.preventDefault();var code=$('cc').value.trim();if(!code)return;var b=$('cb');show($('cm'),'');busy(b,true,L.sending);
+api('/v1/account/coupon/redeem','POST',{code:code}).then(function(r){busy(b,false,L.couponButton);if(!r.ok){show($('cm'),errText(r));return}
+$('cc').value='';show($('cm'),fill(L.couponApplied,{date:day(r.body.quota.grantEndsAt)}),'ok');loadUsage()})});
+var pre=new URLSearchParams(location.search).get('code')||new URLSearchParams(location.search).get('invite');if(pre)$('cc').value=pre.slice(0,40);
 function loadUsers(){return api('/v1/account/users').then(function(r){if(!r.ok)return;USERS=r.body.users||[];drawUsers()})}
+var COUPONS=[];
+function mailOpts(){return {months:Number($('cpm').value),lang:$('cpl').value}}
+function note(text,ok){show($('cam'),text,ok?'ok':'err')}
+function drawCoupons(){var ul=$('coupons');ul.textContent='';
+if(!COUPONS.length){var li=document.createElement('li');li.className='meta';li.textContent=L.couponNone;ul.appendChild(li);return}
+COUPONS.slice().reverse().forEach(function(c){var li=document.createElement('li');var info=document.createElement('div');
+var nm=document.createElement('div');nm.className='name';nm.textContent=c.code;
+var meta=document.createElement('div');meta.className='meta';meta.textContent=(L.planNames[c.plan]||c.plan)+' · '+fill(L.couponMonthsOf,{n:c.months})+' · '+fill(L.couponUses,{used:c.uses,max:c.maxUses})+(c.note?' · '+c.note:'');
+var form=document.createElement('form');form.className='row';form.hidden=true;
+var email=document.createElement('input');email.type='text';email.placeholder=L.couponEmailPlaceholder;email.setAttribute('aria-label',L.couponEmailPlaceholder);
+var go=document.createElement('button');go.className='btn';go.type='submit';go.textContent=L.couponSend;form.appendChild(email);form.appendChild(go);
+form.addEventListener('submit',function(e){e.preventDefault();var to=email.value.trim();if(!to)return;busy(go,true,L.sending);
+api('/v1/account/coupons/send','POST',Object.assign({code:c.code,email:to},mailOpts())).then(function(r){busy(go,false,L.couponSend);
+if(r.ok){note(fill(L.couponSentTo,{email:r.body.email}),true);email.value='';form.hidden=true;loadMails()}else{note(errText(r))}},function(){busy(go,false,L.couponSend);note(L.offline)})});
+info.appendChild(nm);info.appendChild(meta);info.appendChild(form);li.appendChild(info);
+var actions=document.createElement('div');actions.className='row';
+var copy=document.createElement('button');copy.className='btn ghost';copy.type='button';copy.textContent=L.couponCopy;
+copy.addEventListener('click',function(){(navigator.clipboard?navigator.clipboard.writeText(c.code):Promise.reject()).then(function(){copy.textContent=L.couponCopied;setTimeout(function(){copy.textContent=L.couponCopy},1500)},function(){})});
+var send=document.createElement('button');send.className='btn ghost';send.type='button';send.textContent=L.couponSend;
+send.addEventListener('click',function(){form.hidden=!form.hidden;if(!form.hidden)email.focus()});
+actions.appendChild(copy);actions.appendChild(send);li.appendChild(actions);ul.appendChild(li)})}
+function loadCoupons(){return api('/v1/account/coupons').then(function(r){if(!r.ok)return;COUPONS=r.body.coupons||[];drawCoupons()})}
+function linkify(box,text){box.textContent='';text.split(/(https?:\\/\\/[^\\s<>"]+)/).forEach(function(part,i){if(i%2){var a=document.createElement('a');a.href=part;a.textContent=part;a.target='_blank';a.rel='noopener';box.appendChild(a)}else box.appendChild(document.createTextNode(part))})}
+function drawMails(list){var ul=$('mails');ul.textContent='';
+if(!list.length){var li=document.createElement('li');li.className='meta';li.textContent=L.mailNone;ul.appendChild(li);return}
+list.forEach(function(m){var li=document.createElement('li');var info=document.createElement('div');
+var nm=document.createElement('div');nm.className='name';nm.textContent=m.subject;
+var meta=document.createElement('div');meta.className='meta';meta.textContent=L.mailTo+' '+m.to+' · '+when(m.at)+' · '+(m.ok?L.mailSent:L.mailFailed);
+var body=document.createElement('pre');body.className='mailtext';body.hidden=true;linkify(body,m.text+(m.error?'\\n\\n'+m.error:''));
+info.appendChild(nm);info.appendChild(meta);info.appendChild(body);li.appendChild(info);
+var b=document.createElement('button');b.className='btn ghost';b.type='button';b.textContent=L.mailView;
+b.addEventListener('click',function(){body.hidden=!body.hidden;b.textContent=body.hidden?L.mailView:L.mailHide});
+li.appendChild(b);ul.appendChild(li)})}
+function loadMails(){return api('/v1/account/emails?limit=50').then(function(r){if(r.ok)drawMails(r.body.emails||[])})}
+$('cpi').addEventListener('submit',function(e){e.preventDefault();var emails=$('cpe').value.split(/[\\s,;]+/).filter(Boolean);
+if(!emails.length){note(L.couponNeedEmail);$('cpe').focus();return}var b=$('cpb');note('');busy(b,true,L.sending);
+api('/v1/account/coupons','POST',Object.assign({emails:emails},mailOpts())).then(function(r){busy(b,false,L.couponInvite);
+if(!r.ok){note(errText(r));return}var skipped=r.body.skipped||[];
+note(fill(L.couponInvited,{n:r.body.coupons.length})+(skipped.length?' '+fill(L.couponSkipped,{emails:skipped.join(', ')}):''),true);
+$('cpe').value=skipped.join('\\n');loadCoupons();loadMails()},function(){busy(b,false,L.couponInvite);note(L.offline)})});
+$('cpf').addEventListener('submit',function(e){e.preventDefault();var b=$('cpg');note('');busy(b,true,L.sending);
+api('/v1/account/coupons','POST',{count:Number($('cpn').value),maxUses:Number($('cpu').value),note:$('cpt').value.trim(),months:Number($('cpm').value)}).then(function(r){busy(b,false,L.couponCreate);
+if(!r.ok){note(errText(r));return}note(fill(L.couponCreated,{n:r.body.coupons.length}),true);loadCoupons()},function(){busy(b,false,L.couponCreate);note(L.offline)})});
 api('/v1/account/me').then(function(r){if(r.status===401){location.href=${js(links.login)};return}
 if(!r.ok){show(gm,errText(r));return}CSRF=r.body.csrfToken||'';ADMIN=!!r.body.admin;BILLING=!!r.body.billing;$('who').textContent=r.body.email;
 $('lead').textContent=fill(L.signedInAs,{email:r.body.email});$('admin').hidden=!ADMIN;
 if(!r.body.emailVerified){$('vb').hidden=false;$('dev').disabled=true;$('kb').disabled=true}loadKeys();var back=new URLSearchParams(location.search).get('billing');
 if(back&&history.replaceState)history.replaceState(null,'',location.pathname);
 if(back==='cancel')show($('bm'),L.billingCancelled);
-((back==='success'||back==='portal')&&BILLING?api('/v1/account/billing/sync','POST',{}).then(function(s){if(s.ok&&back==='success')show($('bm'),L.billingDone,'ok')}):Promise.resolve()).then(loadUsage).then(function(){if(back||(WANT&&BILLING))$('billing').scrollIntoView({block:'start'})});if(ADMIN)loadUsers()},function(){show(gm,L.offlineReload)});
+((back==='success'||back==='portal')&&BILLING?api('/v1/account/billing/sync','POST',{}).then(function(s){if(s.ok&&back==='success')show($('bm'),L.billingDone,'ok')}):Promise.resolve()).then(loadUsage).then(function(){if(back||(WANT&&BILLING))$('billing').scrollIntoView({block:'start'})});if(ADMIN){loadUsers();loadCoupons();loadMails()}},function(){show(gm,L.offlineReload)});
 $('kf').addEventListener('submit',function(e){e.preventDefault();show(km,'');var dev=$('dev').value.trim();if(!dev){$('dev').focus();return}var b=$('kb');busy(b,true,L.creating);
 api('/v1/account/keys','POST',{deviceName:dev}).then(function(r){busy(b,false,L.createKey);if(!r.ok){show(km,errText(r));return}
 $('nk').textContent=r.body.key;$('new').hidden=false;$('copy').focus();loadKeys()})});
