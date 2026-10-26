@@ -21,6 +21,22 @@ pub struct Activation {
     pub quota: Value,
 }
 
+/// The account's usage report (`GET /v1/account/usage`): the current quota view — the EFFECTIVE plan (a coupon
+/// counts), its limits, the month's counters and the plan dates — plus one row per day and per key.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct UsageReport {
+    /// The quota view: `plan`, `limits`, `month`, `today`, `monthResetsAt`, `dayResetsAt`, `grantEndsAt`,
+    /// `viaCoupon`, `planRenewsAt`, `planCancelsAtPeriodEnd`.
+    #[serde(default)]
+    pub quota: Value,
+    /// One row per day: `{day, requests, sttRequests, audioSeconds, llmRequests, llmTokens, ttsRequests, ttsChars, ttsSeconds, rooms}`.
+    #[serde(default)]
+    pub days: Vec<Value>,
+    /// Per activation key totals.
+    #[serde(default)]
+    pub by_key: Vec<Value>,
+}
+
 #[derive(Deserialize)]
 struct ActivateAnswer {
     #[serde(default)]
@@ -45,5 +61,14 @@ impl GatewayClient {
             return Err(GatewayError::Config("unexpected /v1/activate answer: ok is not true".into()));
         }
         Ok(answer.activation)
+    }
+
+    /// `GET /v1/account/usage?days=N` — the account's quota view and daily usage, read with the activation key as the
+    /// Bearer. Read-only, so no retry-safe body: never retried by the SDK.
+    pub async fn usage(&self, days: u32) -> Result<UsageReport> {
+        let path = format!("/v1/account/usage?days={days}");
+        let call = CallOptions::default();
+        let spec = Spec::new(Method::GET, &path, TimeoutGroup::Admin, &call);
+        self.fetch(&spec).await?.json(&path)
     }
 }

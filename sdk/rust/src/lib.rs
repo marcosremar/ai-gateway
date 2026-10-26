@@ -43,7 +43,7 @@ pub mod telemetry;
 pub mod tts_engine;
 pub mod types;
 
-pub use account::Activation;
+pub use account::{Activation, UsageReport};
 pub use apps::{
     AppDeploymentRef, AppImage, AppImageVersion, AppView, Apps, FallbackCredential, FallbackEntry, FallbackPlan, ModelRoutesSpec,
     RouteEntrySpec, RouteTarget, VoiceByGender,
