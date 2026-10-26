@@ -27,6 +27,7 @@ import {
 } from './pages';
 import { ATTEMPT_LIMITS, AttemptLimiter, type Window } from './rate-limit';
 import { pageLang, type PageLang } from './page-strings';
+import type { EmailLog } from './email-log';
 import type { BillingService } from './billing';
 import { AccountError, KEY_PREFIX, normalizeEmail, type AccountService, type User } from './service';
 import { audioSecondsOf, llmTokensOf, wavSeconds, type Counter, type Counters, type UsageMeter } from './usage';
@@ -146,6 +147,7 @@ export interface AccountsHttpOptions {
   sessionRequests?: () => number;
   /** Stripe billing; null while STRIPE_SECRET_KEY is unset (no plan routes, no plan limits). */
   billing?: BillingService | null;
+  emailLog?: EmailLog;
 }
 
 export function createAccountsHttp(opts: AccountsHttpOptions) {
@@ -266,6 +268,12 @@ export function createAccountsHttp(opts: AccountsHttpOptions) {
         await service.rememberLanguage(w.user, requestLang(req));
         await service.sendVerification(w.user);
         send(res, 200, { ok: true });
+        return;
+      }
+      case 'GET /v1/account/emails': {
+        const w = who(req, false);
+        if (!service.isAdminUser(w.user)) throw new AccountError(403, 'Esta área é só da administração.', 'not_admin');
+        send(res, 200, { emails: opts.emailLog?.list(Number(new URL(req.url ?? '/', 'http://x').searchParams.get('limit') ?? 50) || 50) ?? [] });
         return;
       }
       case 'GET /v1/account/invite': {

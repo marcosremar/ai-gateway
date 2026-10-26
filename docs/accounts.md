@@ -104,3 +104,16 @@ real subscription is never lowered; when `endsAt` passes the account is back on 
   the code can be redeemed, not the end of the plan.
 - State: `coupons` in `accounts.json` (`usedBy` holds the account ids). Quotas follow the effective plan only when
   billing is configured, like the plan limits.
+
+## E-mail log
+
+Every e-mail the accounts send (sign-up confirmation, reset, access key, coupon invitation) is recorded: when, to whom,
+subject, text and whether the provider accepted it (`ok: false` + `error` when it failed). The last 200 are kept, newest
+first, in `account-emails.json` next to `accounts.json`, and each one is also a log line (`accounts: e-mail`: to,
+subject, ok — never the body). The password-reset link (`/reset#token=…`) and activation keys (`ucast_live_…`) are
+replaced by `[oculto]` before anything is stored; confirmation and invitation links stay readable on purpose, so the
+admin can click them while debugging.
+
+- `GET /v1/admin/emails?limit=50` (admin key) and `GET /v1/account/emails?limit=50` (admin account session) →
+  `{ emails: [{ id, at, to, subject, text, ok, error? }] }`.
+- The admin area of `/account` lists them under "E-mails enviados": click "Ver" to read the text, with clickable links.

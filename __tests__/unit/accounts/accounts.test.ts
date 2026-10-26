@@ -18,6 +18,7 @@ import { AdminGate } from '../../../src/config/admin-gate';
 import { createAccessRoutes } from '../../../src/config/access-routes';
 import { KeyAudit } from '../../../src/config/key-audit';
 import { createCouponRoutes } from '../../../src/accounts/coupon-routes';
+import { EmailLog, withoutSecrets } from '../../../src/accounts/email-log';
 import { createAccounts, hashPassword, verifyPassword, wavSeconds, type AccountsConfig } from '../../../src/accounts';
 import type { EmailMessage, EmailSender } from '../../../src/accounts/email';
 import type { LLMProvider, STTProvider } from '../../../src/gateway/providers/cloud/types';
@@ -126,7 +127,7 @@ async function startGateway(config: Partial<AccountsConfig> = {}, opts: GwOpts =
     deepHealth: { authorize: (t) => access.admins.has(keyRegistry.resolve(t)?.userId ?? ''), report: async () => ({ status: 200, body: { deep: true } }) },
     customRoutes: [
       ...createAccessRoutes({ access, gate, audit: new KeyAudit() }),
-      ...createCouponRoutes({ service: accounts.service, gate }),
+      ...createCouponRoutes({ service: accounts.service, gate, emailLog: accounts.emailLog }),
       { method: 'POST', path: '/v1/rooms', handler: async (_req, res) => { res.writeHead(201, { 'Content-Type': 'application/json' }); res.end('{"code":"K7Q2XM"}'); } },
       { method: 'POST', path: '/v1/realtime/sessions', handler: async (req, res) => {
         req.resume();
@@ -730,7 +731,7 @@ describe('pages and host routing', () => {
     expect((await call(gw, 'GET', '/signup')).status).toBe(401);
     const dash = await call(gw, 'GET', '/account', { host: SITE });
     expect(dash.text).toContain('Comece em três passos');
-    expect(dash.text).toContain("if(ADMIN){loadUsers();loadCoupons()}");
+    expect(dash.text).toContain("if(ADMIN){loadUsers();loadCoupons();loadMails()}");
     expect(dash.text).not.toMatch(/ style="/);
   });
 
@@ -1072,5 +1073,63 @@ describe('invitation sign-up (the e-mail link opens the sign-up already on the c
     const redeemed = await call(gw, 'POST', '/v1/account/coupon/redeem', { headers: { Cookie: cookieOf(r), 'X-CSRF-Token': r.json.csrfToken }, body: { code } });
     expect(redeemed.status).toBe(200);
     expect(redeemed.json.quota.viaCoupon).toBe(true);
+  });
+});
+
+describe('e-mail log (the last e-mails, to debug and to click)', () => {
+  const OWNER = 'dono@ucast.me';
+  const adminHeaders = { Authorization: `Bearer ${ADMIN_KEY}` };
+
+  it('lists the newest e-mails first with the invitation link, for the admin key and the admin account only', async () => {
+    const gw = await startGateway({ adminEmails: [OWNER] });
+    const owner = await signup(gw, OWNER);
+    const ana = await signup(gw, 'ana@example.com');
+    const made = await call(gw, 'POST', '/v1/admin/coupons', { headers: adminHeaders, body: { emails: ['novo@example.com'], lang: 'en' } });
+    const code = made.json.coupons[0].code as string;
+    const byKey = await call(gw, 'GET', '/v1/admin/emails?limit=5', { headers: adminHeaders });
+    expect(byKey.status).toBe(200);
+    expect(byKey.json.emails[0]).toMatchObject({ to: 'novo@example.com', subject: 'Your ucast.me code', ok: true });
+    expect(byKey.json.emails[0].text).toContain(`https://ucast.me/signup?invite=${code}`);
+    expect(byKey.json.emails.map((m: { to: string }) => m.to)).toContain('ana@example.com');
+    expect((await call(gw, 'GET', '/v1/admin/emails')).status).toBe(401);
+    const bySession = await call(gw, 'GET', '/v1/account/emails', { headers: { Cookie: owner.cookie } });
+    expect(bySession.json.emails[0].to).toBe('novo@example.com');
+    expect((await call(gw, 'GET', '/v1/account/emails', { headers: { Cookie: ana.cookie } })).status).toBe(403);
+  });
+
+  it('hides the password-reset link and activation keys but keeps the other links', async () => {
+    const gw = await startGateway();
+    await signup(gw, 'ana@example.com');
+    gw.mails.length = 0;
+    await call(gw, 'POST', '/v1/account/password/forgot', { body: { email: 'ana@example.com' } });
+    const token = /#token=([A-Za-z0-9_-]+)/.exec(gw.mails[0]!.text)![1]!;
+    const listed = (await call(gw, 'GET', '/v1/admin/emails', { headers: adminHeaders })).json.emails;
+    expect(listed[0].text).toContain('/reset#token=[oculto]');
+    expect(listed[0].text).not.toContain(token);
+    expect(withoutSecrets('Cole: ucast_live_AbCd1234_xyz agora')).toBe('Cole: ucast_live_[oculto] agora');
+    expect(withoutSecrets('https://ucast.me/verify#token=abc')).toBe('https://ucast.me/verify#token=abc');
+  });
+
+  it('records a failed send, keeps only the last entries and survives a restart', async () => {
+    const failing: EmailSender = { configured: true, send: async () => { throw new Error('resend answered 500'); } };
+    const log = new EmailLog(undefined, () => 1_000, 3);
+    const wrapped = log.wrap(failing);
+    await expect(wrapped.send({ to: 'a@b.co', subject: 'x', text: 'y', html: 'z' })).rejects.toThrow('resend answered 500');
+    expect(log.list()[0]).toMatchObject({ ok: false, error: 'resend answered 500' });
+    const fine = log.wrap({ configured: true, send: async () => {} });
+    for (let i = 0; i < 5; i++) await fine.send({ to: `p${i}@b.co`, subject: `s${i}`, text: 't', html: 'h' });
+    expect(log.list(10).map(m => m.subject)).toEqual(['s4', 's3', 's2']);
+
+    const dir = mkdtempSync(join(tmpdir(), 'accounts-'));
+    try {
+      const gw = await startGateway({ adminEmails: ['dono@ucast.me'] }, { dir });
+      await call(gw, 'POST', '/v1/admin/coupons', { headers: adminHeaders, body: { emails: ['novo@example.com'] } });
+      await gw.close();
+      const restarted = await startGateway({ adminEmails: ['dono@ucast.me'] }, { dir });
+      const listed = await call(restarted, 'GET', '/v1/admin/emails', { headers: adminHeaders });
+      expect(listed.json.emails[0]).toMatchObject({ to: 'novo@example.com', ok: true });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

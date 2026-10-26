@@ -97,6 +97,8 @@ input:-webkit-autofill{-webkit-box-shadow:0 0 0 40px var(--screen) inset;-webkit
 #cpf input[type=number]{width:5.5rem;flex:none}
 textarea{width:100%;background:var(--screen);border:1px solid var(--hairline-2);border-radius:3px;padding:12px;font:inherit;color:inherit;resize:vertical}
 #cpi{margin:12px 0}
+.mailtext{white-space:pre-wrap;overflow-wrap:anywhere;background:var(--screen);border:1px solid var(--hairline);border-radius:3px;padding:12px;margin:8px 0 0;font-size:.85rem;color:var(--ink-2)}
+.mailtext a{color:var(--phos)}
 .mini{display:flex;flex-direction:column;gap:2px;font-size:.8rem;color:var(--ink-3)}
 #cpf{align-items:flex-end}
 .linkish{background:none;border:0;padding:0;color:var(--ink-3);font-size:.86rem;text-decoration:underline;text-underline-offset:3px;cursor:pointer}
@@ -362,7 +364,9 @@ export function dashboardPage(links: PageLinks): RenderedPage {
 <label class="mini"><span>${t.couponMaxUses}</span><input id="cpu" type="number" min="1" max="100000" value="1"></label>
 <input id="cpt" type="text" maxlength="80" placeholder="${esc(t.couponNote)}" aria-label="${esc(t.couponNote)}">
 <button id="cpg" class="btn ghost" type="submit">${t.client.couponCreate}</button></form></details>
-<ul id="coupons" class="users" aria-label="${esc(t.couponsHeading)}"></ul></section>
+<ul id="coupons" class="users" aria-label="${esc(t.couponsHeading)}"></ul>
+<h3>${t.emailsHeading}</h3><p class="hint">${t.emailsHint}</p>
+<ul id="mails" class="users" aria-label="${esc(t.emailsHeading)}"></ul></section>
 <details class="quiet"><summary>${t.accountSettings}</summary>
 <section class="card" aria-labelledby="xh"><h2 id="xh">${t.deleteHeading}</h2><p class="hint">${t.deleteHint}</p>
 <form id="xf" class="row"><label class="sr" for="xpw">${t.deletePassword}</label>
@@ -465,7 +469,7 @@ var email=document.createElement('input');email.type='text';email.placeholder=L.
 var go=document.createElement('button');go.className='btn';go.type='submit';go.textContent=L.couponSend;form.appendChild(email);form.appendChild(go);
 form.addEventListener('submit',function(e){e.preventDefault();var to=email.value.trim();if(!to)return;busy(go,true,L.sending);
 api('/v1/account/coupons/send','POST',Object.assign({code:c.code,email:to},mailOpts())).then(function(r){busy(go,false,L.couponSend);
-if(r.ok){note(fill(L.couponSentTo,{email:r.body.email}),true);email.value='';form.hidden=true}else{note(errText(r))}},function(){busy(go,false,L.couponSend);note(L.offline)})});
+if(r.ok){note(fill(L.couponSentTo,{email:r.body.email}),true);email.value='';form.hidden=true;loadMails()}else{note(errText(r))}},function(){busy(go,false,L.couponSend);note(L.offline)})});
 info.appendChild(nm);info.appendChild(meta);info.appendChild(form);li.appendChild(info);
 var actions=document.createElement('div');actions.className='row';
 var copy=document.createElement('button');copy.className='btn ghost';copy.type='button';copy.textContent=L.couponCopy;
@@ -474,12 +478,24 @@ var send=document.createElement('button');send.className='btn ghost';send.type='
 send.addEventListener('click',function(){form.hidden=!form.hidden;if(!form.hidden)email.focus()});
 actions.appendChild(copy);actions.appendChild(send);li.appendChild(actions);ul.appendChild(li)})}
 function loadCoupons(){return api('/v1/account/coupons').then(function(r){if(!r.ok)return;COUPONS=r.body.coupons||[];drawCoupons()})}
+function linkify(box,text){box.textContent='';text.split(/(https?:\\/\\/[^\\s<>"]+)/).forEach(function(part,i){if(i%2){var a=document.createElement('a');a.href=part;a.textContent=part;a.target='_blank';a.rel='noopener';box.appendChild(a)}else box.appendChild(document.createTextNode(part))})}
+function drawMails(list){var ul=$('mails');ul.textContent='';
+if(!list.length){var li=document.createElement('li');li.className='meta';li.textContent=L.mailNone;ul.appendChild(li);return}
+list.forEach(function(m){var li=document.createElement('li');var info=document.createElement('div');
+var nm=document.createElement('div');nm.className='name';nm.textContent=m.subject;
+var meta=document.createElement('div');meta.className='meta';meta.textContent=L.mailTo+' '+m.to+' · '+when(m.at)+' · '+(m.ok?L.mailSent:L.mailFailed);
+var body=document.createElement('pre');body.className='mailtext';body.hidden=true;linkify(body,m.text+(m.error?'\\n\\n'+m.error:''));
+info.appendChild(nm);info.appendChild(meta);info.appendChild(body);li.appendChild(info);
+var b=document.createElement('button');b.className='btn ghost';b.type='button';b.textContent=L.mailView;
+b.addEventListener('click',function(){body.hidden=!body.hidden;b.textContent=body.hidden?L.mailView:L.mailHide});
+li.appendChild(b);ul.appendChild(li)})}
+function loadMails(){return api('/v1/account/emails?limit=50').then(function(r){if(r.ok)drawMails(r.body.emails||[])})}
 $('cpi').addEventListener('submit',function(e){e.preventDefault();var emails=$('cpe').value.split(/[\\s,;]+/).filter(Boolean);
 if(!emails.length){note(L.couponNeedEmail);$('cpe').focus();return}var b=$('cpb');note('');busy(b,true,L.sending);
 api('/v1/account/coupons','POST',Object.assign({emails:emails},mailOpts())).then(function(r){busy(b,false,L.couponInvite);
 if(!r.ok){note(errText(r));return}var skipped=r.body.skipped||[];
 note(fill(L.couponInvited,{n:r.body.coupons.length})+(skipped.length?' '+fill(L.couponSkipped,{emails:skipped.join(', ')}):''),true);
-$('cpe').value=skipped.join('\\n');loadCoupons()},function(){busy(b,false,L.couponInvite);note(L.offline)})});
+$('cpe').value=skipped.join('\\n');loadCoupons();loadMails()},function(){busy(b,false,L.couponInvite);note(L.offline)})});
 $('cpf').addEventListener('submit',function(e){e.preventDefault();var b=$('cpg');note('');busy(b,true,L.sending);
 api('/v1/account/coupons','POST',{count:Number($('cpn').value),maxUses:Number($('cpu').value),note:$('cpt').value.trim(),months:Number($('cpm').value)}).then(function(r){busy(b,false,L.couponCreate);
 if(!r.ok){note(errText(r));return}note(fill(L.couponCreated,{n:r.body.coupons.length}),true);loadCoupons()},function(){busy(b,false,L.couponCreate);note(L.offline)})});
@@ -489,7 +505,7 @@ $('lead').textContent=fill(L.signedInAs,{email:r.body.email});$('admin').hidden=
 if(!r.body.emailVerified){$('vb').hidden=false;$('dev').disabled=true;$('kb').disabled=true}loadKeys();var back=new URLSearchParams(location.search).get('billing');
 if(back&&history.replaceState)history.replaceState(null,'',location.pathname);
 if(back==='cancel')show($('bm'),L.billingCancelled);
-((back==='success'||back==='portal')&&BILLING?api('/v1/account/billing/sync','POST',{}).then(function(s){if(s.ok&&back==='success')show($('bm'),L.billingDone,'ok')}):Promise.resolve()).then(loadUsage).then(function(){if(back||(WANT&&BILLING))$('billing').scrollIntoView({block:'start'})});if(ADMIN){loadUsers();loadCoupons()}},function(){show(gm,L.offlineReload)});
+((back==='success'||back==='portal')&&BILLING?api('/v1/account/billing/sync','POST',{}).then(function(s){if(s.ok&&back==='success')show($('bm'),L.billingDone,'ok')}):Promise.resolve()).then(loadUsage).then(function(){if(back||(WANT&&BILLING))$('billing').scrollIntoView({block:'start'})});if(ADMIN){loadUsers();loadCoupons();loadMails()}},function(){show(gm,L.offlineReload)});
 $('kf').addEventListener('submit',function(e){e.preventDefault();show(km,'');var dev=$('dev').value.trim();if(!dev){$('dev').focus();return}var b=$('kb');busy(b,true,L.creating);
 api('/v1/account/keys','POST',{deviceName:dev}).then(function(r){busy(b,false,L.createKey);if(!r.ok){show(km,errText(r));return}
 $('nk').textContent=r.body.key;$('new').hidden=false;$('copy').focus();loadKeys()})});
