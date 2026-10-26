@@ -90,6 +90,15 @@ describe('mic check (node sdk)', () => {
     expect(report!.floor).toBe('loudFloor');
   });
 
+  it('names a muted microphone even though nothing is heard', () => {
+    const segmenter = new AudioSegmenter({ vadInference: () => 0 });
+    const zeros = new Int16Array(FRAME);
+    for (let i = 0; i < 10 * PER_S; i += 1) segmenter.feedFrame(zeros);
+    expect(segmenter.silentInput()).toBeNull(); // inside the grace
+    for (let i = 0; i < 6 * PER_S + 1; i += 1) segmenter.feedFrame(zeros);
+    expect(segmenter.silentInput()).toBe('dead');
+  });
+
   it('the segmenter exposes the report', () => {
     const segmenter = new AudioSegmenter({ vadInference: () => 0 });
     expect(segmenter.micReport()).toBeNull(); // nothing fed yet

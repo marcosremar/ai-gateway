@@ -127,7 +127,7 @@ const VAD_WINDOW_BYTES = VAD_WINDOW_SAMPLES * 2; // int16
 
 // The microphone advice (pause floor, noise, far/echo) shared by every SDK: same rules as the Rust crate.
 // Re-exported for consumers and imported here for the segmenter itself.
-import { createMicCheck, type MicCheck as MicCheckT, type MicReport as MicReportT } from '../browser/voice/mic-check';
+import { createMicCheck, type MicCheck as MicCheckT, type MicIssue as MicIssueT, type MicReport as MicReportT } from '../browser/voice/mic-check';
 export { adviceIssues, createMicCheck, floorOf, MIC_CHECK } from '../browser/voice/mic-check';
 export type { Floor, MicCheck, MicIssue, MicReport } from '../browser/voice/mic-check';
 const DEFAULTS = {
@@ -361,6 +361,11 @@ export class AudioSegmenter {
    */
   micReport(): MicReportT | null {
     return this.micCheck.report();
+  }
+
+  /** The input sends only zeros or only hiss (muted, unplugged, transmitter off): restart the capture. */
+  silentInput(): MicIssueT | null {
+    return this.micCheck.silentInput();
   }
 
   /**

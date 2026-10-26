@@ -65,6 +65,10 @@ pub enum MicIssue {
     Noisy,
     /// Electrical hum (50/60 Hz): another cable, USB port or power socket, away from power supplies.
     Hum,
+    /// The microphone sends only digital zeros: muted, unplugged, or the wireless receiver is off.
+    Dead,
+    /// Only loud hiss, no voice: the wireless transmitter is off, flat or far from the receiver.
+    Hiss,
 }
 
 impl MicIssue {
@@ -72,7 +76,12 @@ impl MicIssue {
     /// 11–41 %, noisy (5 dB) 18 % — yes; clipping (×3, ×8) 6.9 %, hum (−35 / −55 dB) 6.9–7.2 %, a quiet
     /// microphone (−15 / −25 dB) 6.8–7.0 % — no.
     pub fn hurts_transcription(self) -> bool {
-        matches!(self, MicIssue::FarOrEcho | MicIssue::Noisy)
+        matches!(self, MicIssue::FarOrEcho | MicIssue::Noisy | MicIssue::Dead | MicIssue::Hiss)
+    }
+
+    /// Whether this means the app gets no speech at all (the person must act, nothing will be transcribed).
+    pub fn is_silent_input(self) -> bool {
+        matches!(self, MicIssue::Dead | MicIssue::Hiss)
     }
 }
 
@@ -135,6 +144,8 @@ pub struct MicReport {
     pub issues: Vec<MicIssue>,
     /// What the room sounds like while nobody talks (`None` with too few pauses to tell).
     pub floor: Option<Floor>,
+    /// The input was all zeros (or only hiss) for at least [`DEAD_AFTER_S`] inside the window.
+    pub dead_input: Option<MicIssue>,
 }
 
 impl MicReport {
@@ -151,6 +162,24 @@ impl MicReport {
     }
 }
 
+/// Seconds of digital zeros (or of pure hiss) before the input is called dead.
+pub const DEAD_AFTER_S: f32 = 15.0;
+/// Below this the sample is a digital zero (a microphone's own noise floor is ~1e-4 and up).
+const DIGITAL_ZERO: f32 = 1e-6;
+/// White noise crosses zero in ~50 % of the sample pairs; a voice in ~5–20 %.
+const HISS_RMS: f32 = 0.05;
+const HISS_CROSSINGS: f32 = 0.3;
+
+/// A frame with no voice that is loud and changes sign all the time: white noise, not speech.
+fn is_hiss(frame: &[f32]) -> bool {
+    if frame.len() < 2 {
+        return false;
+    }
+    let rms = (frame.iter().map(|s| s * s).sum::<f32>() / frame.len() as f32).sqrt();
+    let crossings = frame.windows(2).filter(|w| (w[0] < 0.0) != (w[1] < 0.0)).count();
+    rms > HISS_RMS && crossings as f32 / (frame.len() - 1) as f32 > HISS_CROSSINGS
+}
+
 #[derive(Clone, Copy)]
 struct Frame {
     db: f32,
@@ -161,6 +190,9 @@ struct Frame {
 pub struct MicCheck {
     frames: VecDeque<Frame>,
     pauses: VecDeque<f32>,
+    /// Seconds the input has been all zeros / all hiss (anything else resets it).
+    zeros_s: f32,
+    hiss_s: f32,
 }
 
 impl Default for MicCheck {
@@ -193,7 +225,7 @@ fn power(x: &[f32], freq: f32) -> f32 {
 
 impl MicCheck {
     pub fn new() -> Self {
-        Self { frames: VecDeque::with_capacity(frames_in(WINDOW_S) + 1), pauses: VecDeque::new() }
+        Self { frames: VecDeque::with_capacity(frames_in(WINDOW_S) + 1), pauses: VecDeque::new(), zeros_s: 0.0, hiss_s: 0.0 }
     }
 
     /// One frame as it came from the microphone (before any level) and the VAD's speech probability for it.
@@ -201,6 +233,19 @@ impl MicCheck {
         let ms = frame.iter().map(|s| s * s).sum::<f32>() / frame.len().max(1) as f32;
         let db = 10.0 * ms.max(1e-18).log10();
         let clipped = frame.iter().filter(|s| s.abs() >= 0.98).count() as u16;
+        let seconds = frame.len() as f32 / SAMPLE_RATE as f32;
+        // A muted or unplugged input (and a wireless receiver without its transmitter) sends nothing a report
+        // could measure: no sound ever arrives, so it is watched here rather than in the report.
+        if frame.iter().all(|s| s.abs() <= DIGITAL_ZERO) {
+            self.zeros_s += seconds;
+        } else {
+            self.zeros_s = 0.0;
+        }
+        if prob < 0.1 && is_hiss(frame) {
+            self.hiss_s += seconds;
+        } else {
+            self.hiss_s = 0.0;
+        }
         if self.frames.len() == frames_in(WINDOW_S) {
             self.frames.pop_front();
         }
@@ -218,6 +263,21 @@ impl MicCheck {
     pub fn clear(&mut self) {
         self.frames.clear();
         self.pauses.clear();
+        self.zeros_s = 0.0;
+        self.hiss_s = 0.0;
+    }
+
+    /// The input itself is unusable: digital zeros or only hiss for [`DEAD_AFTER_S`] seconds. This is the one
+    /// case [`report`](Self::report) can never show (it needs 8 s of sound, and a dead input sends none), so a
+    /// live app checks it every frame and restarts the capture.
+    pub fn silent_input(&self) -> Option<MicIssue> {
+        if self.zeros_s >= DEAD_AFTER_S {
+            Some(MicIssue::Dead)
+        } else if self.hiss_s >= DEAD_AFTER_S {
+            Some(MicIssue::Hiss)
+        } else {
+            None
+        }
     }
 
     /// `None` until there are [`MIN_SOUND_S`] seconds of sound in the window.
@@ -301,7 +361,7 @@ impl MicCheck {
         if humming {
             issues.push(MicIssue::Hum);
         }
-        Some(MicReport { speech_db, noise_db, vad_confidence, clipped_share, hum, issues, floor })
+        Some(MicReport { speech_db, noise_db, vad_confidence, clipped_share, hum, issues, floor, dead_input: self.silent_input() })
     }
 }
 
@@ -516,6 +576,7 @@ mod tests {
             hum: None,
             issues,
             floor,
+            dead_input: None,
         };
         let all = vec![MicIssue::FarOrEcho, MicIssue::Noisy, MicIssue::TooQuiet];
         for floor in [Floor::StudioQuiet, Floor::RoomAmbient, Floor::MeetingFloor, Floor::DigitalSilence] {
@@ -553,5 +614,60 @@ mod tests {
             assert!(!r.issues.contains(&MicIssue::Noisy), "{r:?}");
             assert!(r.floor.is_some(), "the floor is still reported: {r:?}");
         }
+    }
+
+    #[test]
+    fn a_muted_microphone_is_named_even_though_nothing_is_heard() {
+        // A report needs 8 s of sound and a dead input has none: this is what the live check is for.
+        let mut check = MicCheck::new();
+        let zeros = vec![0.0f32; FRAME_SAMPLES];
+        let per_s = SAMPLE_RATE as usize / FRAME_SAMPLES;
+        for _ in 0..(10 * per_s) {
+            check.push(&zeros, 0.0);
+        }
+        assert_eq!(check.silent_input(), None, "10 s is still inside the grace");
+        // Feed until it fires, with a cap: a dead input must be named well before 20 s.
+        let mut frames = 0;
+        while check.silent_input().is_none() && frames < 20 * per_s {
+            check.push(&zeros, 0.0);
+            frames += 1;
+        }
+        assert_eq!(check.silent_input(), Some(MicIssue::Dead), "after {} frames", frames + 10 * per_s);
+        assert!(frames <= 7 * per_s, "fired too late: {frames} frames after the 10 s mark");
+        assert!(check.report().is_none(), "a dead input never gives a report");
+        // One frame with sound clears it.
+        let mut sound = vec![0.0f32; FRAME_SAMPLES];
+        sound[0] = 0.2;
+        check.push(&sound, 0.9);
+        assert_eq!(check.silent_input(), None);
+    }
+
+    #[test]
+    fn a_receiver_without_its_transmitter_is_named_as_hiss() {
+        // Hollyland Lark with the transmitter off: rms 0.31, signs changing every sample (2026-10-19).
+        let mut check = MicCheck::new();
+        let per_s = SAMPLE_RATE as usize / FRAME_SAMPLES;
+        let mut noise = Noise(5);
+        let frame: Vec<f32> = (0..FRAME_SAMPLES).map(|_| (noise.next() * 0.55).clamp(-1.0, 1.0)).collect();
+        let mut frames = 0;
+        while check.silent_input().is_none() && frames < 20 * per_s {
+            check.push(&frame, 0.02);
+            frames += 1;
+        }
+        assert_eq!(check.silent_input(), Some(MicIssue::Hiss), "after {frames} frames");
+        assert!(frames >= 14 * per_s, "named too early: {frames} frames");
+    }
+
+    #[test]
+    fn a_quiet_room_is_not_a_dead_microphone() {
+        // A real microphone's own noise floor is ~1e-4 and up; voice and room tone reset both watches.
+        let mut check = MicCheck::new();
+        let per_s = SAMPLE_RATE as usize / FRAME_SAMPLES;
+        let mut noise = Noise(3);
+        let frame: Vec<f32> = (0..FRAME_SAMPLES).map(|_| noise.next() * 1e-3).collect();
+        for _ in 0..(60 * per_s) {
+            check.push(&frame, 0.02);
+        }
+        assert_eq!(check.silent_input(), None);
     }
 }

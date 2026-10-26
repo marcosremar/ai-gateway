@@ -96,6 +96,39 @@ def test_loud_noise_with_speech_is_still_named() -> None:
     assert report.floor is Floor.LOUD_FLOOR, report.floor
 
 
+def test_names_a_muted_microphone_even_though_nothing_is_heard() -> None:
+    # A report needs 8 s of sound and a dead input has none: `silent_input()` is what a live app checks.
+    check = MicCheck()
+    zeros = np.zeros(FRAME, dtype=np.float32)
+    for _ in range(10 * PER_S):
+        check.push(zeros, 0.0)
+    assert check.silent_input() is None, "inside the grace"
+    for _ in range(6 * PER_S + 1):
+        check.push(zeros, 0.0)
+    assert check.silent_input() is MicIssue.DEAD
+    assert check.report() is None
+    sound = np.zeros(FRAME, dtype=np.float32)
+    sound[0] = 0.2
+    check.push(sound, 0.9)
+    assert check.silent_input() is None
+
+
+def test_names_a_receiver_without_its_transmitter_as_hiss() -> None:
+    check = MicCheck()
+    rng = np.random.default_rng(5)
+    for _ in range(16 * PER_S):
+        check.push(np.clip(rng.standard_normal(FRAME) * 0.55, -1, 1).astype(np.float32), 0.02)
+    assert check.silent_input() is MicIssue.HISS
+
+
+def test_a_quiet_room_is_not_a_dead_microphone() -> None:
+    check = MicCheck()
+    rng = np.random.default_rng(3)
+    for _ in range(60 * PER_S):
+        check.push((rng.standard_normal(FRAME) * 1e-3).astype(np.float32), 0.02)
+    assert check.silent_input() is None
+
+
 def test_clear_goes_back_to_empty() -> None:
     check = MicCheck()
     _frames(check, 30.0, -28.0, 0.95)

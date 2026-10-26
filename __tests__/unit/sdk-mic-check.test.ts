@@ -133,7 +133,7 @@ describe('mic check', () => {
 
   it('a quiet floor hides the noisy advice but keeps far away', () => {
     const base = {
-      speechDb: -30, noiseDb: -36, vadConfidence: 0.9, clippedShare: 0, hum: null,
+      speechDb: -30, noiseDb: -36, vadConfidence: 0.9, clippedShare: 0, hum: null, deadInput: null,
       issues: ['farOrEcho', 'noisy', 'tooQuiet'] as const,
     };
     for (const floor of ['studioQuiet', 'roomAmbient', 'meetingFloor', 'digitalSilence'] as const) {
@@ -144,6 +144,51 @@ describe('mic check', () => {
     for (const floor of ['loudFloor', null] as const) {
       expect(adviceIssues({ ...base, issues: [...base.issues], floor })).toEqual([...base.issues]);
     }
+  });
+
+  it('names a muted microphone even though nothing is heard', () => {
+    // A report needs 8 s of sound and a dead input has none: `silentInput()` is what a live app checks.
+    const check = createMicCheck();
+    const zeros = new Float32Array(SILERO_FRAME_SAMPLES);
+    for (let i = 0; i < 10 * 31; i += 1) check.push(zeros, 0);
+    expect(check.silentInput()).toBeNull(); // inside the grace
+    for (let i = 0; i < 6 * 31 + 1; i += 1) check.push(zeros, 0);
+    expect(check.silentInput()).toBe('dead');
+    expect(check.report()).toBeNull();
+    const sound = new Float32Array(SILERO_FRAME_SAMPLES);
+    sound[0] = 0.2;
+    check.push(sound, 0.9);
+    expect(check.silentInput()).toBeNull();
+  });
+
+  it('names a receiver without its transmitter as hiss', () => {
+    const check = createMicCheck();
+    let seed = 5;
+    const noise = () => {
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      return ((seed >>> 8) / 2 ** 24 - 0.5) * 3.46;
+    };
+    for (let i = 0; i < 16 * 31; i += 1) {
+      const frame = new Float32Array(SILERO_FRAME_SAMPLES);
+      for (let j = 0; j < frame.length; j += 1) frame[j] = Math.max(-1, Math.min(1, noise() * 0.55));
+      check.push(frame, 0.02);
+    }
+    expect(check.silentInput()).toBe('hiss');
+  });
+
+  it('a quiet room is not a dead microphone', () => {
+    const check = createMicCheck();
+    let seed = 3;
+    const noise = () => {
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      return ((seed >>> 8) / 2 ** 24 - 0.5) * 3.46;
+    };
+    for (let i = 0; i < 60 * 31; i += 1) {
+      const frame = new Float32Array(SILERO_FRAME_SAMPLES);
+      for (let j = 0; j < frame.length; j += 1) frame[j] = noise() * 1e-3;
+      check.push(frame, 0.02);
+    }
+    expect(check.silentInput()).toBeNull();
   });
 
   it('a table microphone with only room tone is not a noisy room', () => {

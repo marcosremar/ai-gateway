@@ -9,7 +9,7 @@
  */
 import { SILERO_FRAME_SAMPLES, SILERO_SAMPLE_RATE } from './silero';
 
-export type MicIssue = 'clipping' | 'farOrEcho' | 'tooQuiet' | 'noisy' | 'hum';
+export type MicIssue = 'clipping' | 'farOrEcho' | 'tooQuiet' | 'noisy' | 'hum' | 'dead' | 'hiss';
 
 /**
  * What the microphone hears **when nobody is talking** — the pause floor, which decides whether an advice is
@@ -33,7 +33,7 @@ export function floorOf(pauseMedianDb: number, digitalShare: number): Floor {
  * (5 dB) 18 %. Clipping (6.9 %), hum (6.9–7.2 %) and a quiet microphone (6.8–7.0 %) are real but were transcribed
  * through — show them for recordings or an audience, not as a reason for bad subtitles.
  */
-export const ISSUES_THAT_HURT_TRANSCRIPTION: readonly MicIssue[] = ['farOrEcho', 'noisy'];
+export const ISSUES_THAT_HURT_TRANSCRIPTION: readonly MicIssue[] = ['farOrEcho', 'noisy', 'dead', 'hiss'];
 
 export interface MicReport {
   /** Median level of the frames with sound (dBFS, as it came from the microphone). */
@@ -50,6 +50,8 @@ export interface MicReport {
   issues: MicIssue[];
   /** What the room sounds like while nobody talks (null with too few pauses to tell). */
   floor: Floor | null;
+  /** The input was all zeros (or only hiss) for `deadAfterS` inside the window. */
+  deadInput: MicIssue | null;
 }
 
 /**
@@ -78,6 +80,8 @@ export const MIC_CHECK = {
   noisyVoicedProb: 0.85,
   humPeakDb: 8,
   humAudibleDb: -25,
+  /** Seconds of digital zeros (or of only hiss) before the input is called dead. */
+  deadAfterS: 15,
 } as const;
 
 const FRAMES_PER_S = SILERO_SAMPLE_RATE / SILERO_FRAME_SAMPLES;
@@ -108,6 +112,12 @@ export interface MicCheck {
   push(frame: Float32Array, probability: number | null): void;
   /** null until there are `minSoundS` seconds of sound in the window. */
   report(): MicReport | null;
+  /**
+   * The input itself is unusable: digital zeros or only hiss for `deadAfterS` seconds. The one case `report()`
+   * can never show (it needs 8 s of sound, and a dead input sends none), so a live page checks it every frame
+   * and restarts the capture.
+   */
+  silentInput(): MicIssue | null;
   /** Forget everything (another microphone). */
   clear(): void;
 }
@@ -115,19 +125,39 @@ export interface MicCheck {
 export function createMicCheck(): MicCheck {
   let frames: Frame[] = [];
   let pauses: number[] = [];
+  let zerosS = 0;
+  let hissS = 0;
   const keepPauses = MIC_CHECK.humS * SILERO_SAMPLE_RATE;
+  const secondsOf = (frame: Float32Array) => frame.length / SILERO_SAMPLE_RATE;
   return {
     push(frame, probability) {
       const prob = probability ?? 0;
-      let ms = 0, clipped = 0;
-      for (const s of frame) { ms += s * s; if (Math.abs(s) >= 0.98) clipped += 1; }
+      let ms = 0, clipped = 0, loudest = 0, crossings = 0;
+      for (let i = 0; i < frame.length; i += 1) {
+        const v = frame[i]!;
+        ms += v * v;
+        if (Math.abs(v) >= 0.98) clipped += 1;
+        if (Math.abs(v) > loudest) loudest = Math.abs(v);
+        if (i > 0 && (v < 0) !== (frame[i - 1]! < 0)) crossings += 1;
+      }
       const db = 10 * Math.log10(Math.max(ms / Math.max(frame.length, 1), 1e-18));
+      // A muted or unplugged input (and a wireless receiver missing its transmitter) sends nothing a report
+      // could measure, so it is watched here.
+      zerosS = loudest <= 1e-6 ? zerosS + secondsOf(frame) : 0;
+      const rms = Math.sqrt(ms / Math.max(frame.length, 1));
+      const isHiss = prob < 0.1 && rms > 0.05 && frame.length > 1 && crossings / (frame.length - 1) > 0.3;
+      hissS = isHiss ? hissS + secondsOf(frame) : 0;
       frames.push({ db, prob, known: probability !== null, clipped });
       if (frames.length > framesIn(MIC_CHECK.windowS)) frames = frames.slice(-framesIn(MIC_CHECK.windowS));
       if (prob < 0.2 && db > -100) {
         for (const s of frame) pauses.push(s);
         if (pauses.length > keepPauses) pauses = pauses.slice(-keepPauses);
       }
+    },
+    silentInput() {
+      if (zerosS >= MIC_CHECK.deadAfterS) return 'dead';
+      if (hissS >= MIC_CHECK.deadAfterS) return 'hiss';
+      return null;
     },
     report() {
       // Digital silence has no level: keep it out of `noiseDb` (as the Rust crate does) but count it for the floor.
@@ -189,11 +219,13 @@ export function createMicCheck(): MicCheck {
         issues.push('noisy');
       }
       if (humming) issues.push('hum');
-      return { speechDb, noiseDb, vadConfidence, clippedShare, hum, issues, floor };
+      return { speechDb, noiseDb, vadConfidence, clippedShare, hum, issues, floor, deadInput: this.silentInput() };
     },
     clear() {
       frames = [];
       pauses = [];
+      zerosS = 0;
+      hissS = 0;
     },
   };
 }

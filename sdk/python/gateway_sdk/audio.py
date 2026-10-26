@@ -72,6 +72,8 @@ MIC_CHECK_UNSURE_VAD = 0.95
 MIC_CHECK_NOISY_VOICED_PROB = 0.85
 # Far/echo needs 10 s of unsure speech and a voice at least this loud.
 MIC_CHECK_FAR_MIN_SPEECH_DB = -40.0
+# Seconds of digital zeros (or of only hiss) before the input is called dead.
+MIC_CHECK_DEAD_AFTER_S = 15.0
 
 
 class MicIssue(str, Enum):
@@ -81,6 +83,9 @@ class MicIssue(str, Enum):
     TOO_QUIET = "tooQuiet"
     NOISY = "noisy"
     HUM = "hum"
+    # The input itself is unusable: nothing will be transcribed at all.
+    DEAD = "dead"
+    HISS = "hiss"
 
 
 class Floor(str, Enum):
@@ -114,6 +119,7 @@ class MicReport:
     clipped_share: float
     issues: list[MicIssue]
     floor: Floor | None
+    dead_input: MicIssue | None = None
 
     def snr_db(self) -> float | None:
         return None if self.noise_db is None else self.speech_db - self.noise_db
@@ -129,9 +135,26 @@ class MicCheck:
 
     def __init__(self) -> None:
         self._frames: deque[tuple[float, float, int]] = deque(maxlen=int(MIC_CHECK_WINDOW_S * 16000 / VAD_WINDOW_SAMPLES))
+        # Seconds of digital zeros / of pure hiss; anything else resets them.
+        self._zeros_s = 0.0
+        self._hiss_s = 0.0
 
     def clear(self) -> None:
         self._frames.clear()
+        self._zeros_s = 0.0
+        self._hiss_s = 0.0
+
+    def silent_input(self) -> MicIssue | None:
+        """The input itself is unusable: zeros or only hiss for `MIC_CHECK_DEAD_AFTER_S` seconds.
+
+        The one case `report()` can never show (it needs 8 s of sound, and a dead input sends none), so a live
+        app checks it every frame and restarts the capture.
+        """
+        if self._zeros_s >= MIC_CHECK_DEAD_AFTER_S:
+            return MicIssue.DEAD
+        if self._hiss_s >= MIC_CHECK_DEAD_AFTER_S:
+            return MicIssue.HISS
+        return None
 
     def push(self, frame: "np.ndarray", probability: float) -> None:
         """One 512-sample frame as it came from the microphone and the VAD's probability for it."""
@@ -142,6 +165,19 @@ class MicCheck:
             clipped = int(np.count_nonzero(np.abs(samples) >= 0.98))
         else:
             db, clipped = -180.0, 0
+        seconds = samples.size / 16000.0
+        # A muted or unplugged input (and a wireless receiver missing its transmitter) sends nothing a report
+        # could measure, so it is watched here.
+        if samples.size and bool(np.all(np.abs(samples) <= 1e-6)):
+            self._zeros_s += seconds
+        else:
+            self._zeros_s = 0.0
+        rms = math.sqrt(float(np.mean(np.square(samples)))) if samples.size else 0.0
+        crossings = float(np.mean(np.signbit(samples[1:]) != np.signbit(samples[:-1]))) if samples.size > 1 else 0.0
+        if probability < 0.1 and rms > 0.05 and crossings > 0.3:
+            self._hiss_s += seconds
+        else:
+            self._hiss_s = 0.0
         self._frames.append((db, float(probability), clipped))
 
     def report(self) -> MicReport | None:
@@ -199,6 +235,7 @@ class MicCheck:
             clipped_share=clipped_share,
             issues=issues,
             floor=floor,
+            dead_input=self.silent_input(),
         )
 
 
@@ -440,6 +477,10 @@ class AudioSegmenter:
         `report.floor` says what the room sounds like while nobody talks; show `report.advice_issues()`.
         """
         return self._mic_check.report()
+
+    def silent_input(self) -> MicIssue | None:
+        """The input sends only zeros or only hiss (muted, unplugged, transmitter off): restart the capture."""
+        return self._mic_check.silent_input()
 
     def flush(self) -> None:
         """Emit any remaining speech buffer (call on stop/cleanup)."""
