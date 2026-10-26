@@ -21,6 +21,7 @@ interface Block {
   steps?: string[];
   code?: string;
   after?: string[];
+  why?: string;
 }
 
 interface Chrome { help: string; why: string; fallback: string }
@@ -39,7 +40,7 @@ function button(b: NonNullable<Block['button']>): string {
 }
 
 function render(lang: PageLang, subject: string, b: Block): Mail {
-  const c = CHROME[lang];
+  const c = { ...CHROME[lang], ...(b.why ? { why: b.why } : {}) };
   const steps = b.steps ? `<ol style="margin:0 0 16px;padding-left:20px;font:400 16px/1.6 ${FONT};color:${INK_2}">${b.steps.map(s => `<li style="margin:0 0 4px">${escape(s)}</li>`).join('')}</ol>` : '';
   const code = b.code ? `<p style="margin:0 0 20px;padding:14px 16px;background:#f2f6f7;border:1px solid #dfe8ea;border-radius:4px;font:500 15px/1.5 ${MONO};color:${INK};word-break:break-all">${escape(b.code)}</p>` : '';
   const fallback = b.button ? `<p style="margin:24px 0 0;font:400 13px/1.5 ${FONT};color:${MUTED}">${escape(c.fallback)}<br><a href="${escape(b.button.href)}" style="color:${ACCENT};word-break:break-all">${escape(b.button.href)}</a></p>` : '';
@@ -112,6 +113,15 @@ export function accountDeleted(lang: PageLang): Mail {
     fr: { subject: 'Votre compte ucast.me a été supprimé', heading: 'Votre compte a été supprimé', intro: ['Le compte, ses clés d’activation et l’historique d’utilisation ont été effacés. Tout abonnement actif a été résilié.', 'Si ce n’était pas vous, répondez à cet e-mail.'] },
   }[lang];
   return render(lang, t.subject, { heading: t.heading, intro: t.intro });
+}
+
+export function coupon(lang: PageLang, code: string, months: number): Mail {
+  const t = {
+    pt: { why: 'Você recebeu este e-mail porque a equipe do ucast.me convidou este endereço.', subject: 'Seu código do ucast.me', heading: 'Seu código promocional', intro: `Este código libera ${months} ${months === 1 ? 'mês' : 'meses'} de uso do plano Pro, sem cartão.`, button: 'Criar a conta com o cupom', after: 'A conta já começa com o plano Pro: é só escolher uma senha. Se preferir, o código também vale na página da conta, em “Código promocional”.' },
+    en: { why: 'You are receiving this because the ucast.me team invited this address.', subject: 'Your ucast.me code', heading: 'Your promo code', intro: `This code unlocks ${months} ${months === 1 ? 'month' : 'months'} of the Pro plan, no card needed.`, button: 'Create your account with the coupon', after: 'Your account starts on the Pro plan: just choose a password. The code also works on the account page, under “Promo code”.' },
+    fr: { why: 'Vous recevez ce message car l’équipe ucast.me a invité cette adresse.', subject: 'Votre code ucast.me', heading: 'Votre code promo', intro: `Ce code débloque ${months} mois d’utilisation du forfait Pro, sans carte.`, button: 'Créer le compte avec le coupon', after: 'Le compte démarre avec le forfait Pro : choisissez simplement un mot de passe. Le code fonctionne aussi sur la page du compte, sous « Code promo ».' },
+  }[lang];
+  return render(lang, t.subject, { heading: t.heading, intro: [t.intro], code, button: { label: t.button, href: `${SITE}/signup?invite=${encodeURIComponent(code)}` }, after: [t.after], why: t.why });
 }
 
 export function accessKey(lang: PageLang, key: string): Mail {

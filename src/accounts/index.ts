@@ -11,9 +11,11 @@
 //   - `recordInference`     the proxy's `onInference` hook (usage of each STT/LLM/TTS request);
 //   - `streamMeter`         admission and metering of a streaming STT session (a WebSocket, not a request).
 
+import { dirname, join } from 'path';
 import type { IncomingMessage, Server, ServerResponse } from 'http';
 import { accountsConfigFromEnv, type AccountsConfig } from './config';
 import { createEmailSender, type EmailSender } from './email';
+import { EmailLog } from './email-log';
 import { createAccountsHttp } from './http';
 import { BillingService, billingConfigFromEnv } from './billing';
 import { AttemptLimiter } from './rate-limit';
@@ -27,6 +29,7 @@ export { UsageMeter, wavSeconds, audioSecondsOf, llmTokensOf } from './usage';
 export { AttemptLimiter, ATTEMPT_LIMITS } from './rate-limit';
 export { hashPassword, verifyPassword } from './password';
 export { isCrossSite } from './http';
+export { EmailLog, withoutSecrets, type LoggedEmail } from './email-log';
 
 export interface CreateAccountsOptions {
   env?: Record<string, string | undefined>;
@@ -46,13 +49,14 @@ export interface CreateAccountsOptions {
 export function createAccounts(opts: CreateAccountsOptions = {}) {
   const config: AccountsConfig = { ...accountsConfigFromEnv(opts.env ?? process.env), ...opts.config };
   const now = opts.now ?? Date.now;
-  const email = opts.email ?? createEmailSender({ ...config.email, log: opts.log });
+  const emailLog = new EmailLog(config.statePath ? join(dirname(config.statePath), 'account-emails.json') : undefined, now, 200, opts.log);
+  const email = emailLog.wrap(opts.email ?? createEmailSender({ ...config.email, log: opts.log }));
   const usage = new UsageMeter({ path: config.usagePath, retentionDays: config.usageRetentionDays, now, log: opts.log });
   const billingConfig = billingConfigFromEnv(opts.env ?? process.env, config.publicBaseUrl);
   const service = new AccountService({ config, usage, email, isAdmin: opts.isAdmin, planLimits: Boolean(billingConfig), now, log: opts.log });
   const billing = billingConfig ? new BillingService(billingConfig, service, opts.stripeFetch, now) : null;
   const limiter = new AttemptLimiter(now);
-  const http = createAccountsHttp({ service, usage, limiter, log: opts.log, sessionRequests: opts.sessionRequests, billing });
+  const http = createAccountsHttp({ service, usage, limiter, emailLog, log: opts.log, sessionRequests: opts.sessionRequests, billing });
 
   /** Puts the account routes and the quota gate in front of the proxy's listeners (call after the rooms' mount). */
   function mount(server: Server): void {
@@ -73,11 +77,13 @@ export function createAccounts(opts: CreateAccountsOptions = {}) {
     service,
     usage,
     limiter,
+    emailLog,
     emailConfigured: email.configured,
     billingConfigured: Boolean(billing),
     async init(): Promise<void> {
       await service.load();
       await usage.load();
+      await emailLog.load();
       service.start();
     },
     resolveAppKey: (token: string) => service.resolveAppKey(token),
@@ -90,6 +96,7 @@ export function createAccounts(opts: CreateAccountsOptions = {}) {
     async stop(): Promise<void> {
       await service.stop();
       await usage.flush();
+      await emailLog.flush();
     },
   };
 }

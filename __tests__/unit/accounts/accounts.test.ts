@@ -17,6 +17,8 @@ import { AccessKeys } from '../../../src/config/access-keys';
 import { AdminGate } from '../../../src/config/admin-gate';
 import { createAccessRoutes } from '../../../src/config/access-routes';
 import { KeyAudit } from '../../../src/config/key-audit';
+import { createCouponRoutes } from '../../../src/accounts/coupon-routes';
+import { EmailLog, withoutSecrets } from '../../../src/accounts/email-log';
 import { createAccounts, hashPassword, verifyPassword, wavSeconds, type AccountsConfig } from '../../../src/accounts';
 import type { EmailMessage, EmailSender } from '../../../src/accounts/email';
 import type { LLMProvider, STTProvider } from '../../../src/gateway/providers/cloud/types';
@@ -87,7 +89,7 @@ function signedEvent(event: unknown, nowMs: number, secret = WEBHOOK_SECRET) {
   return { raw, header: `t=${t},v1=${v1}` };
 }
 
-const NO_QUOTA = { audioSeconds: 0, llmTokens: 0, ttsChars: 0, rooms: 0, requestsPerDay: 0, concurrentRequests: 0 };
+const NO_QUOTA = { audioSeconds: 0, llmTokens: 0, ttsChars: 0, ttsSeconds: 0, rooms: 0, requestsPerDay: 0, concurrentRequests: 0 };
 
 interface GwOpts { adminApp?: boolean; dir?: string; appEnv?: Record<string, string>; sessionRequests?: number; hold?: Promise<void>; stripe?: typeof fetch }
 
@@ -125,7 +127,11 @@ async function startGateway(config: Partial<AccountsConfig> = {}, opts: GwOpts =
     deepHealth: { authorize: (t) => access.admins.has(keyRegistry.resolve(t)?.userId ?? ''), report: async () => ({ status: 200, body: { deep: true } }) },
     customRoutes: [
       ...createAccessRoutes({ access, gate, audit: new KeyAudit() }),
-      { method: 'POST', path: '/v1/rooms', handler: async (_req, res) => { res.writeHead(201, { 'Content-Type': 'application/json' }); res.end('{"code":"K7Q2XM"}'); } },
+      ...createCouponRoutes({ service: accounts.service, gate, emailLog: accounts.emailLog }),
+      { method: 'POST', path: '/v1/rooms', handler: async (req, res) => {
+        res.writeHead(201, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ code: 'K7Q2XM', account: req.headers['x-ucast-account'] ?? null }));
+      } },
       { method: 'POST', path: '/v1/realtime/sessions', handler: async (req, res) => {
         req.resume();
         await opts.hold;
@@ -566,11 +572,62 @@ describe('activation keys', () => {
 });
 
 describe('metering and quota', () => {
-  it('counts audio seconds, tokens, rooms and requests per user and per key, by day', async () => {
+  it('one subtitle session per account: a second key of the same account is the second session', async () => {
     const gw = await startGateway();
     const s = await signup(gw);
+    const a = await newKey(gw, s, 'Notebook do palco');
+    const b = await newKey(gw, s, 'PC de casa');
+    // A estálegendando: a primeira pedida de B é recusada, com o nome da
+    // máquina que está em uso.
+    expect((await stt(gw, a.key, 2)).status).toBe(200);
+    const busy = await stt(gw, b.key, 2);
+    expect(busy.status).toBe(409);
+    expect(busy.json.error).toMatchObject({ code: 'session_busy' });
+    expect(busy.json.error.message).toContain('Notebook do palco');
+    // O retry de B NÃO conquista a sessão: a tentativa recusada não é
+    // atividade — enquanto A estiver dentro da janela, B continua de fora.
+    gw.clock.now += 60_000;
+    expect((await stt(gw, b.key, 2)).status).toBe(409);
+    gw.clock.now += 60_000;
+    expect((await stt(gw, b.key, 2)).status).toBe(409);
+    // A própria sessão continua (a mesma chave passa; o keyOf renovou o
+    // lastUsedAt, então a atividade recente dela fala por si).
+    expect((await stt(gw, a.key, 2)).status).toBe(200);
+    // A sessão de A silencia: passada a janela, B entra (o app que fechou sem
+    // avisar também libera por aqui).
+    gw.clock.now += 3 * 60_000;
+    expect((await stt(gw, b.key, 2)).status).toBe(200);
+    // E agora B é a sessão: A que volta de imediato é recusada.
+    const back = await stt(gw, a.key, 2);
+    expect(back.status).toBe(409);
+    expect(back.json.error.message).toContain('PC de casa');
+    // Outra conta nunca é afetada.
+    const other = await newKey(gw, await signup(gw, 'bia@example.com'));
+    expect((await stt(gw, other.key, 2)).status).toBe(200);
+  });
+
+  it('the room creation carries the account id (a client-provided header is replaced); app keys carry none', async () => {
+    const gw = await startGateway();
+    const s = await signup(gw);
+    const k = await newKey(gw, s);
+    const spoofed = await call(gw, 'POST', '/v1/rooms', { headers: { Authorization: `Bearer ${k.key}`, 'x-ucast-account': 'usr_spoofed' }, body: { languages: ['en'] } });
+    expect(spoofed.status).toBe(201);
+    const account = (spoofed.json as { account: string }).account;
+    expect(account).toBeTruthy();
+    expect(account).not.toBe('usr_spoofed');
+    const byApp = await call(gw, 'POST', '/v1/rooms', { headers: { Authorization: `Bearer ${APP_KEY}`, 'x-ucast-account': 'usr_spoofed' }, body: { languages: ['en'] } });
+    expect(byApp.status).toBe(201);
+    expect((byApp.json as { account: string | null }).account).toBeNull();
+  });
+
+  it('counts audio seconds, tokens, rooms and requests per user and per key, by day', async () => {
+    const gw = await startGateway();
+    // Duas CONTAS: a regra de sessão (uma por conta) impede duas chaves da
+    // mesma conta de trabalharem juntas, então o retrato por chave usa uma
+    // chave em cada conta.
+    const s = await signup(gw);
     const a = await newKey(gw, s, 'A');
-    const b = await newKey(gw, s, 'B');
+    const b = await newKey(gw, await signup(gw, 'bia@example.com'), 'B');
     expect((await stt(gw, a.key, 2)).status).toBe(200);
     expect((await stt(gw, b.key, 3)).status).toBe(200);
     const chat = await call(gw, 'POST', '/v1/chat/completions', { headers: { Authorization: `Bearer ${a.key}` }, body: { model: 'llm', messages: [{ role: 'user', content: 'oi' }] } });
@@ -582,11 +639,11 @@ describe('metering and quota', () => {
     expect(u.status).toBe(200);
     const today = u.json.days.at(-1);
     expect(today.day).toBe('2026-10-10');
-    expect(today).toMatchObject({ requests: 4, sttRequests: 2, audioSeconds: 5, llmRequests: 1, llmTokens: 42, rooms: 1 });
+    expect(today).toMatchObject({ requests: 3, sttRequests: 1, audioSeconds: 2, llmRequests: 1, llmTokens: 42, rooms: 1 });
     const byKey = Object.fromEntries(u.json.byKey.map((x: { deviceName: string }) => [x.deviceName, x]));
     expect(byKey.A).toMatchObject({ audioSeconds: 2, llmTokens: 42, rooms: 1, requests: 3 });
-    expect(byKey.B).toMatchObject({ audioSeconds: 3, requests: 1 });
-    expect(u.json.quota.month.audioSeconds).toBe(5);
+    expect(byKey.B).toBeUndefined();
+    expect(u.json.quota.month.audioSeconds).toBe(2);
     // The app can read its own usage with the key (read-only).
     expect((await call(gw, 'GET', '/v1/account/usage', { headers: { Authorization: `Bearer ${a.key}` } })).status).toBe(200);
     // Durable.
@@ -728,7 +785,7 @@ describe('pages and host routing', () => {
     expect((await call(gw, 'GET', '/signup')).status).toBe(401);
     const dash = await call(gw, 'GET', '/account', { host: SITE });
     expect(dash.text).toContain('Comece em três passos');
-    expect(dash.text).toContain("if(ADMIN)loadUsers()");
+    expect(dash.text).toContain("if(ADMIN){loadUsers();loadCoupons();loadMails()}");
     expect(dash.text).not.toMatch(/ style="/);
   });
 
@@ -807,5 +864,340 @@ describe('resend sender', () => {
     const sender = createEmailSender({ resendApiKey: 're_test', from: 'ucast.me <no-reply@ucast.me>', replyTo: 'support@ucast.me', logLinks: false, fetchImpl });
     await sender.send({ to: 'ana@example.com', subject: 's', text: 't', html: 'h' });
     expect(bodies[0]).toMatchObject({ to: ['ana@example.com'], reply_to: 'support@ucast.me' });
+  });
+});
+
+describe('coupons (a paid plan for a few months, no card)', () => {
+  const adminHeaders = { Authorization: `Bearer ${ADMIN_KEY}` };
+  const makeCoupons = async (gw: Gw, body: Record<string, unknown> = {}) => {
+    const r = await call(gw, 'POST', '/v1/admin/coupons', { headers: adminHeaders, body });
+    expect(r.status).toBe(201);
+    return r.json.coupons as Array<{ code: string }>;
+  };
+  const redeem = (gw: Gw, s: { cookie: string; csrf: string }, code: string) =>
+    call(gw, 'POST', '/v1/account/coupon/redeem', { headers: { Cookie: s.cookie, 'X-CSRF-Token': s.csrf }, body: { code } });
+  const me = async (gw: Gw, s: { cookie: string }) => (await call(gw, 'GET', '/v1/account/me', { headers: { Cookie: s.cookie } })).json;
+
+  it('only the admin key creates and lists codes', async () => {
+    const gw = await startGateway();
+    expect((await call(gw, 'POST', '/v1/admin/coupons', { body: {} })).status).toBe(401);
+    expect((await call(gw, 'POST', '/v1/admin/coupons', { headers: { Authorization: `Bearer ${APP_KEY}` }, body: {} })).status).toBe(403);
+    const [coupon] = await makeCoupons(gw, { count: 2, note: 'turma A' });
+    expect(coupon!.code).toMatch(/^UCAST-[A-Z2-9]{4}-[A-Z2-9]{4}$/);
+    const listed = await call(gw, 'GET', '/v1/admin/coupons', { headers: adminHeaders });
+    expect(listed.json.coupons).toHaveLength(2);
+    expect(listed.json.coupons[0]).toMatchObject({ plan: 'pro', months: 3, maxUses: 1, uses: 0, note: 'turma A' });
+    expect((await call(gw, 'POST', '/v1/admin/coupons', { headers: adminHeaders, body: { months: 0 } })).status).toBe(400);
+    expect((await call(gw, 'POST', '/v1/admin/coupons', { headers: adminHeaders, body: { plan: 'free' } })).status).toBe(400);
+  });
+
+  it('the admin key can create and e-mail invitations in one call, in the chosen language', async () => {
+    const gw = await startGateway();
+    await signup(gw, 'ana@example.com');
+    gw.mails.length = 0;
+    const r = await call(gw, 'POST', '/v1/admin/coupons', { headers: adminHeaders, body: { emails: ['ana@example.com', 'novo@example.com'], lang: 'fr', months: 3 } });
+    expect(r.status).toBe(201);
+    expect(r.json.skipped).toEqual(['ana@example.com']);
+    expect(r.json.coupons).toHaveLength(1);
+    expect(gw.mails.map(m => [m.to, m.subject])).toEqual([['novo@example.com', 'Votre code ucast.me']]);
+  });
+
+  it('gives Pro for 3 months with no card, applies the Pro limits and returns to Free afterwards', async () => {
+    const gw = await startGateway({}, { stripe: fakeStripe().fetchImpl });
+    const s = await signup(gw);
+    expect((await me(gw, s)).quota).toMatchObject({ plan: 'free', viaCoupon: false });
+    const [coupon] = await makeCoupons(gw);
+    const done = await redeem(gw, s, coupon!.code.toLowerCase().replace(/-/g, ' '));
+    expect(done.status).toBe(200);
+    expect(done.json).toMatchObject({ plan: 'pro', quota: { plan: 'pro', viaCoupon: true, grantEndsAt: '2027-01-10T12:00:00.000Z' } });
+    expect(done.json.quota.limits.audioSeconds).toBe(20 * 3600);
+    gw.clock.now = Date.UTC(2027, 0, 11);
+    const again = await call(gw, 'POST', '/v1/account/login', { body: { email: 'ana@example.com', password: 'senha-forte-123' } });
+    const after = await me(gw, { cookie: cookieOf(again) });
+    expect(after.quota).toMatchObject({ plan: 'free', viaCoupon: false });
+    expect(after.quota.limits.audioSeconds).toBe(2 * 3600);
+  });
+
+  it('the activation answer says the coupon plan and when it ends (the desktop app reads this)', async () => {
+    const gw = await startGateway();
+    const ana = await signup(gw);
+    const { key } = await newKey(gw, ana);
+    const plain = await call(gw, 'POST', '/v1/activate', { body: { key } });
+    expect(plain.json).toMatchObject({ plan: 'free' });
+    expect(plain.json.quota.viaCoupon).toBeUndefined();
+    const [coupon] = await makeCoupons(gw);
+    expect((await redeem(gw, ana, coupon!.code)).status).toBe(200);
+    const act = await call(gw, 'POST', '/v1/activate', { body: { key } });
+    expect(act.status).toBe(200);
+    expect(act.json).toMatchObject({ plan: 'pro', quota: { viaCoupon: true, grantEndsAt: '2027-01-10T12:00:00.000Z' } });
+  });
+
+  it('wants the e-mail confirmed before a code is used, and the invitation footer does not claim an account exists', async () => {
+    const gw = await startGateway({ adminEmails: ['dono@ucast.me'] });
+    const [coupon] = await makeCoupons(gw);
+    const ana = await signup(gw, 'ana@example.com', 'senha-forte-123', false);
+    const early = await redeem(gw, ana, coupon!.code);
+    expect(early.status).toBe(403);
+    expect(early.json.error.code).toBe('email_not_verified');
+    gw.mails.length = 0;
+    await call(gw, 'POST', '/v1/admin/coupons', { headers: adminHeaders, body: { emails: ['novo@example.com'] } });
+    expect(gw.mails[0]!.text).toContain('convidou este endereço');
+    expect(gw.mails[0]!.text).not.toContain('há uma conta');
+  });
+
+  it('refuses unknown, used and second codes and codes past their date', async () => {
+    const gw = await startGateway();
+    const ana = await signup(gw);
+    const bia = await signup(gw, 'bia@example.com');
+    const [first, second] = await makeCoupons(gw, { count: 2 });
+    const [dated] = await makeCoupons(gw, { expiresAt: new Date(gw.clock.now + 86_400_000).toISOString() });
+    expect((await redeem(gw, ana, 'UCAST-NOPE-NOPE')).json.error.code).toBe('invalid_coupon');
+    expect((await redeem(gw, ana, first!.code)).status).toBe(200);
+    expect((await redeem(gw, bia, first!.code)).json.error.code).toBe('coupon_used');
+    expect((await redeem(gw, ana, second!.code)).json.error.code).toBe('coupon_already_redeemed');
+    gw.clock.now += 2 * 86_400_000;
+    expect((await redeem(gw, bia, dated!.code)).json.error.code).toBe('coupon_expired');
+  });
+
+  it('a shared code serves as many accounts as its limit and survives a restart', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'accounts-'));
+    try {
+      const gw = await startGateway({}, { dir });
+      const ana = await signup(gw);
+      const [coupon] = await makeCoupons(gw, { maxUses: 2, months: 6 });
+      expect((await redeem(gw, ana, coupon!.code)).json.quota.grantEndsAt).toBe('2027-04-10T12:00:00.000Z');
+      await gw.close();
+      const restarted = await startGateway({}, { dir });
+      const login = await call(restarted, 'POST', '/v1/account/login', { body: { email: 'ana@example.com', password: 'senha-forte-123' } });
+      expect((await me(restarted, { cookie: cookieOf(login) })).quota).toMatchObject({ plan: 'pro', viaCoupon: true });
+      const bia = await signup(restarted, 'bia@example.com');
+      const cris = await signup(restarted, 'cris@example.com');
+      expect((await redeem(restarted, bia, coupon!.code)).status).toBe(200);
+      expect((await redeem(restarted, cris, coupon!.code)).json.error.code).toBe('coupon_used');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('coupons in the admin panel (session)', () => {
+  const OWNER = 'dono@ucast.me';
+  const withSession = (s: { cookie: string; csrf: string }) => ({ Cookie: s.cookie, 'X-CSRF-Token': s.csrf });
+
+  it('only the admin account lists, creates and e-mails coupons', async () => {
+    const gw = await startGateway({ adminEmails: [OWNER] });
+    const owner = await signup(gw, OWNER);
+    const ana = await signup(gw, 'ana@example.com');
+    expect((await call(gw, 'GET', '/v1/account/coupons', { headers: withSession(ana) })).status).toBe(403);
+    expect((await call(gw, 'POST', '/v1/account/coupons', { headers: withSession(ana), body: { count: 1 } })).status).toBe(403);
+    expect((await call(gw, 'POST', '/v1/account/coupons/send', { headers: withSession(ana), body: { code: 'x', email: 'a@b.co' } })).status).toBe(403);
+    const made = await call(gw, 'POST', '/v1/account/coupons', { headers: withSession(owner), body: { count: 2, months: 3, note: 'turma B' } });
+    expect(made.status).toBe(201);
+    expect(made.json.coupons).toHaveLength(2);
+    const listed = await call(gw, 'GET', '/v1/account/coupons', { headers: withSession(owner) });
+    expect(listed.json.coupons.map((c: { uses: number }) => c.uses)).toEqual([0, 0]);
+  });
+
+  it('creating with e-mails sends one single-use code to each address, in the admin language', async () => {
+    const gw = await startGateway({ adminEmails: [OWNER] });
+    const owner = await signup(gw, OWNER);
+    gw.mails.length = 0;
+    const r = await call(gw, 'POST', '/v1/account/coupons', { headers: { ...withSession(owner), 'Accept-Language': 'fr' }, body: { emails: ['Bia@Example.com', 'cris@example.com'], months: 3 } });
+    expect(r.status).toBe(201);
+    expect(r.json.coupons).toHaveLength(2);
+    expect(gw.mails.map(m => m.to)).toEqual(['bia@example.com', 'cris@example.com']);
+    expect(gw.mails[0]!.subject).toBe('Votre code ucast.me');
+    expect(gw.mails[0]!.text).toContain(r.json.coupons[0].code);
+    expect(gw.mails[1]!.text).toContain(r.json.coupons[1].code);
+    expect(r.json.coupons.every((c: { maxUses: number }) => c.maxUses === 1)).toBe(true);
+  });
+
+  it('sends an existing code to one address and refuses a bad address or an unknown code', async () => {
+    const gw = await startGateway({ adminEmails: [OWNER] });
+    const owner = await signup(gw, OWNER);
+    const made = await call(gw, 'POST', '/v1/account/coupons', { headers: withSession(owner), body: {} });
+    const code = made.json.coupons[0].code as string;
+    gw.mails.length = 0;
+    const sent = await call(gw, 'POST', '/v1/account/coupons/send', { headers: withSession(owner), body: { code, email: 'Dani@Example.com' } });
+    expect(sent.json).toEqual({ ok: true, email: 'dani@example.com' });
+    expect(gw.mails).toHaveLength(1);
+    expect(gw.mails[0]!.text).toContain(code);
+    expect((await call(gw, 'POST', '/v1/account/coupons/send', { headers: withSession(owner), body: { code, email: 'not-an-email' } })).json.error.code).toBe('invalid_email');
+    expect((await call(gw, 'POST', '/v1/account/coupons/send', { headers: withSession(owner), body: { code: 'UCAST-NOPE-NOPE', email: 'a@b.co' } })).json.error.code).toBe('invalid_coupon');
+    expect((await call(gw, 'POST', '/v1/account/coupons', { headers: withSession(owner), body: { emails: ['ok@example.com', 'bad'] } })).json.error.code).toBe('invalid_email');
+  });
+});
+
+describe('account page script', () => {
+  it.each(['pt', 'en', 'fr'])('is valid JavaScript in %s and carries the coupon card and the admin panel', async (lang) => {
+    const gw = await startGateway();
+    const signupPage = await call(gw, 'GET', '/signup', { host: SITE, headers: { 'Accept-Language': lang } });
+    for (const source of [...signupPage.text.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map(m => m[1]!).filter(Boolean)) expect(() => new Function(source)).not.toThrow();
+    expect(signupPage.text).toContain('id="inv"');
+    const page = await call(gw, 'GET', '/account', { host: SITE, headers: { 'Accept-Language': lang } });
+    expect(page.status).toBe(200);
+    const scripts = [...page.text.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map(m => m[1]!).filter(Boolean);
+    expect(scripts.length).toBeGreaterThan(0);
+    for (const source of scripts) expect(() => new Function(source)).not.toThrow();
+    for (const id of ['cf', 'cc', 'cb', 'cm', 'cpf', 'cpb', 'cam', 'coupons']) expect(page.text).toContain(`id="${id}"`);
+  });
+});
+
+describe('coupon invitations', () => {
+  const OWNER = 'dono@ucast.me';
+  const withSession = (s: { cookie: string; csrf: string }) => ({ Cookie: s.cookie, 'X-CSRF-Token': s.csrf });
+
+  it('writes the e-mail in the language the admin picks, whatever the page language', async () => {
+    const gw = await startGateway({ adminEmails: [OWNER] });
+    const owner = await signup(gw, OWNER);
+    gw.mails.length = 0;
+    const r = await call(gw, 'POST', '/v1/account/coupons', { headers: { ...withSession(owner), 'Accept-Language': 'fr' }, body: { emails: ['novo@example.com'], lang: 'en' } });
+    expect(r.status).toBe(201);
+    expect(gw.mails[0]!.subject).toBe('Your ucast.me code');
+    const code = r.json.coupons[0].code as string;
+    gw.mails.length = 0;
+    expect((await call(gw, 'POST', '/v1/account/coupons/send', { headers: withSession(owner), body: { code, email: 'outro@example.com', lang: 'pt' } })).status).toBe(200);
+    expect(gw.mails[0]!.subject).toBe('Seu código do ucast.me');
+    gw.mails.length = 0;
+    await call(gw, 'POST', '/v1/account/coupons/send', { headers: withSession(owner), body: { code, email: 'mais@example.com', lang: 'xx' } });
+    expect(gw.mails[0]!.subject).toMatch(/code|código/i);
+  });
+
+  it('invites any address without an account, skips and reports the ones that already have one', async () => {
+    const gw = await startGateway({ adminEmails: [OWNER] });
+    const owner = await signup(gw, OWNER);
+    await signup(gw, 'ana@example.com');
+    gw.mails.length = 0;
+    const r = await call(gw, 'POST', '/v1/account/coupons', { headers: withSession(owner), body: { emails: ['ANA@example.com', 'novo@example.com', 'novo@example.com', 'outro@qualquer-lugar.org'] } });
+    expect(r.status).toBe(201);
+    expect(r.json.skipped).toEqual(['ana@example.com']);
+    expect(r.json.coupons).toHaveLength(2);
+    expect(gw.mails.map(m => m.to)).toEqual(['novo@example.com', 'outro@qualquer-lugar.org']);
+    const listed = await call(gw, 'GET', '/v1/account/coupons', { headers: withSession(owner) });
+    expect(listed.json.coupons).toHaveLength(2);
+  });
+
+  it('refuses a batch where every address already has an account, and a single send to one of them', async () => {
+    const gw = await startGateway({ adminEmails: [OWNER] });
+    const owner = await signup(gw, OWNER);
+    await signup(gw, 'ana@example.com');
+    const all = await call(gw, 'POST', '/v1/account/coupons', { headers: withSession(owner), body: { emails: ['ana@example.com', OWNER] } });
+    expect(all.status).toBe(409);
+    expect(all.json.error.code).toBe('coupon_email_registered');
+    expect((await call(gw, 'GET', '/v1/account/coupons', { headers: withSession(owner) })).json.coupons).toHaveLength(0);
+    const made = await call(gw, 'POST', '/v1/account/coupons', { headers: withSession(owner), body: {} });
+    const single = await call(gw, 'POST', '/v1/account/coupons/send', { headers: withSession(owner), body: { code: made.json.coupons[0].code, email: 'ana@example.com' } });
+    expect(single.json.error.code).toBe('coupon_email_registered');
+  });
+});
+
+describe('invitation sign-up (the e-mail link opens the sign-up already on the coupon)', () => {
+  const adminHeaders = { Authorization: `Bearer ${ADMIN_KEY}` };
+  const invite = async (gw: Gw, body: Record<string, unknown>) => {
+    const r = await call(gw, 'POST', '/v1/admin/coupons', { headers: adminHeaders, body });
+    expect(r.status).toBe(201);
+    return r.json.coupons[0].code as string;
+  };
+  const lookup = (gw: Gw, code: string) => call(gw, 'GET', `/v1/account/invite?code=${encodeURIComponent(code)}`);
+
+  it('links the e-mail to the invite, opens it, and the account is born on Pro with the e-mail confirmed', async () => {
+    const gw = await startGateway();
+    gw.mails.length = 0;
+    const code = await invite(gw, { emails: ['novo@example.com'], months: 3 });
+    expect(gw.mails[0]!.text).toContain(`https://ucast.me/signup?invite=${code}`);
+    const info = await lookup(gw, code.toLowerCase());
+    expect(info.json).toEqual({ email: 'novo@example.com', plan: 'pro', months: 3 });
+    gw.mails.length = 0;
+    const r = await call(gw, 'POST', '/v1/account/signup', { body: { email: 'Novo@Example.com', password: 'senha-forte-123', invite: code } });
+    expect(r.status).toBe(201);
+    expect(gw.mails).toHaveLength(0);
+    const me = await call(gw, 'GET', '/v1/account/me', { headers: { Cookie: cookieOf(r) } });
+    expect(me.json).toMatchObject({ emailVerified: true, plan: 'pro', quota: { viaCoupon: true, grantEndsAt: '2027-01-10T12:00:00.000Z' } });
+    expect((await lookup(gw, code)).json.error.code).toBe('coupon_used');
+  });
+
+  it('refuses a different e-mail for a bound invite and an unknown code, creating no account', async () => {
+    const gw = await startGateway();
+    const code = await invite(gw, { emails: ['novo@example.com'] });
+    const other = await call(gw, 'POST', '/v1/account/signup', { body: { email: 'intruso@example.com', password: 'senha-forte-123', invite: code } });
+    expect(other.status).toBe(400);
+    expect(other.json.error.code).toBe('coupon_email_mismatch');
+    expect((await call(gw, 'POST', '/v1/account/login', { body: { email: 'intruso@example.com', password: 'senha-forte-123' } })).status).toBe(401);
+    expect((await call(gw, 'POST', '/v1/account/signup', { body: { email: 'novo@example.com', password: 'senha-forte-123', invite: 'UCAST-NOPE-NOPE' } })).json.error.code).toBe('invalid_coupon');
+    expect((await lookup(gw, 'UCAST-NOPE-NOPE')).status).toBe(404);
+  });
+
+  it('a shared code is tied to no e-mail: the account still needs its e-mail confirmed, then the code is used on the account page', async () => {
+    const gw = await startGateway();
+    const code = await invite(gw, { maxUses: 5 });
+    expect((await lookup(gw, code)).json).toEqual({ email: null, plan: 'pro', months: 3 });
+    gw.mails.length = 0;
+    const r = await call(gw, 'POST', '/v1/account/signup', { body: { email: 'turma@example.com', password: 'senha-forte-123', invite: code } });
+    expect(r.status).toBe(201);
+    const me = await call(gw, 'GET', '/v1/account/me', { headers: { Cookie: cookieOf(r) } });
+    expect(me.json).toMatchObject({ emailVerified: false, quota: { viaCoupon: false } });
+    const token = takeVerification(gw, 'turma@example.com')!;
+    expect((await call(gw, 'POST', '/v1/account/verify', { body: { token } })).status).toBe(200);
+    const redeemed = await call(gw, 'POST', '/v1/account/coupon/redeem', { headers: { Cookie: cookieOf(r), 'X-CSRF-Token': r.json.csrfToken }, body: { code } });
+    expect(redeemed.status).toBe(200);
+    expect(redeemed.json.quota.viaCoupon).toBe(true);
+  });
+});
+
+describe('e-mail log (the last e-mails, to debug and to click)', () => {
+  const OWNER = 'dono@ucast.me';
+  const adminHeaders = { Authorization: `Bearer ${ADMIN_KEY}` };
+
+  it('lists the newest e-mails first with the invitation link, for the admin key and the admin account only', async () => {
+    const gw = await startGateway({ adminEmails: [OWNER] });
+    const owner = await signup(gw, OWNER);
+    const ana = await signup(gw, 'ana@example.com');
+    const made = await call(gw, 'POST', '/v1/admin/coupons', { headers: adminHeaders, body: { emails: ['novo@example.com'], lang: 'en' } });
+    const code = made.json.coupons[0].code as string;
+    const byKey = await call(gw, 'GET', '/v1/admin/emails?limit=5', { headers: adminHeaders });
+    expect(byKey.status).toBe(200);
+    expect(byKey.json.emails[0]).toMatchObject({ to: 'novo@example.com', subject: 'Your ucast.me code', ok: true });
+    expect(byKey.json.emails[0].text).toContain(`https://ucast.me/signup?invite=${code}`);
+    expect(byKey.json.emails.map((m: { to: string }) => m.to)).toContain('ana@example.com');
+    expect((await call(gw, 'GET', '/v1/admin/emails')).status).toBe(401);
+    const bySession = await call(gw, 'GET', '/v1/account/emails', { headers: { Cookie: owner.cookie } });
+    expect(bySession.json.emails[0].to).toBe('novo@example.com');
+    expect((await call(gw, 'GET', '/v1/account/emails', { headers: { Cookie: ana.cookie } })).status).toBe(403);
+  });
+
+  it('hides the password-reset link and activation keys but keeps the other links', async () => {
+    const gw = await startGateway();
+    await signup(gw, 'ana@example.com');
+    gw.mails.length = 0;
+    await call(gw, 'POST', '/v1/account/password/forgot', { body: { email: 'ana@example.com' } });
+    const token = /#token=([A-Za-z0-9_-]+)/.exec(gw.mails[0]!.text)![1]!;
+    const listed = (await call(gw, 'GET', '/v1/admin/emails', { headers: adminHeaders })).json.emails;
+    expect(listed[0].text).toContain('/reset#token=[oculto]');
+    expect(listed[0].text).not.toContain(token);
+    expect(withoutSecrets('Cole: ucast_live_AbCd1234_xyz agora')).toBe('Cole: ucast_live_[oculto] agora');
+    expect(withoutSecrets('https://ucast.me/verify#token=abc')).toBe('https://ucast.me/verify#token=abc');
+  });
+
+  it('records a failed send, keeps only the last entries and survives a restart', async () => {
+    const failing: EmailSender = { configured: true, send: async () => { throw new Error('resend answered 500'); } };
+    const log = new EmailLog(undefined, () => 1_000, 3);
+    const wrapped = log.wrap(failing);
+    await expect(wrapped.send({ to: 'a@b.co', subject: 'x', text: 'y', html: 'z' })).rejects.toThrow('resend answered 500');
+    expect(log.list()[0]).toMatchObject({ ok: false, error: 'resend answered 500' });
+    const fine = log.wrap({ configured: true, send: async () => {} });
+    for (let i = 0; i < 5; i++) await fine.send({ to: `p${i}@b.co`, subject: `s${i}`, text: 't', html: 'h' });
+    expect(log.list(10).map(m => m.subject)).toEqual(['s4', 's3', 's2']);
+
+    const dir = mkdtempSync(join(tmpdir(), 'accounts-'));
+    try {
+      const gw = await startGateway({ adminEmails: ['dono@ucast.me'] }, { dir });
+      await call(gw, 'POST', '/v1/admin/coupons', { headers: adminHeaders, body: { emails: ['novo@example.com'] } });
+      await gw.close();
+      const restarted = await startGateway({ adminEmails: ['dono@ucast.me'] }, { dir });
+      const listed = await call(restarted, 'GET', '/v1/admin/emails', { headers: adminHeaders });
+      expect(listed.json.emails[0]).toMatchObject({ to: 'novo@example.com', ok: true });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

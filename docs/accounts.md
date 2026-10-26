@@ -48,11 +48,12 @@ per IP → 429 `too_many_attempts` + `Retry-After`.
 
 Metered when the bearer is an activation key: `POST /v1/chat/completions` (LLM tokens — provider `usage.total_tokens`,
 else prompt chars/4), `/v1/audio/transcriptions` (audio seconds — WAV header, else bytes/16 000), `/v1/audio/speech`
-(input characters, WAV seconds), `/v1/rooms` (rooms created), `/v1/s2s` and `/v1/realtime/sessions` (requests).
+(input characters, WAV seconds), `/v1/rooms` (rooms created — counted for the usage report only), `/v1/s2s` and `/v1/realtime/sessions` (requests).
 Only successful requests count. Counters per UTC day × user × key in `account-usage.json` (debounced atomic writes,
 `ACCOUNTS_USAGE_RETENTION_DAYS`, default 400).
 
-Quota (`ACCOUNT_QUOTA_*`): monthly audio minutes, LLM tokens, TTS characters, rooms (0 = unlimited, the default) →
+Quota (`ACCOUNT_QUOTA_*`): monthly audio minutes, LLM tokens and TTS characters →
+**Sessions: the account keeps ONE subtitle session at a time.** Whoever is captioning now is the key with recent activity (the pipeline talks to the gateway every few seconds while it runs); another key of the account arriving within 3 minutes of that activity is refused with 409 `session_busy`, naming the computer in use. The same key always passes, and once the other side stays silent past the window the account is free again — a closed app releases it without announcing. A refused attempt does not count as activity, so retrying does not take over the session.
 **402** `quota_exceeded` (`metric`, `limit`, `used`, `reset_at`, message in Portuguese). Per account, so one account
 cannot spend the others' share of the app (all activation keys are the same app): a daily request budget
 (`ACCOUNT_QUOTA_REQUESTS_DAY`, default **0 = off** since 2026-10-15 — live subtitles cost ~40 requests a minute, so the old 2000 stopped a talk after ~50 min; when set, a realtime session counts its whole app charge, `perMinute × ⌈ttl/60⌉` = 40
@@ -87,3 +88,33 @@ disabled at boot (nothing overwritten), the rest of the gateway runs. Back the v
 
 `RESEND_API_KEY` + `EMAIL_FROM` → Resend. Without them nothing is sent; `ACCOUNTS_LOG_EMAIL_LINKS=1` writes the
 message (with the link) to the log — local development only.
+
+## Coupons
+
+A coupon gives a paid plan for a few months with no card and no Stripe subscription. The person signs up on the free
+plan, types the code on the account page (`/account?code=UCAST-XXXX-XXXX` fills the field) and the plan becomes
+`user.grant` = `{ plan, endsAt, code }`. The effective plan is the higher of the Stripe plan and the active grant, so a
+real subscription is never lowered; when `endsAt` passes the account is back on its own plan with nothing to cancel.
+
+- `POST /v1/account/coupon/redeem` `{ code }` (session + CSRF, 20 attempts per IP per hour): one code per account;
+  errors `invalid_coupon` (404), `coupon_expired` (410), `coupon_used` (409), `coupon_already_redeemed` (409).
+  The answer is `/me` with the new `quota.grantEndsAt` and `quota.viaCoupon`.
+- `POST /v1/admin/coupons` (admin key) `{ plan = "pro", months = 3, count = 1, maxUses = 1, expiresAt?, note? }` →
+  `{ coupons: [{ code, … }] }`; `GET /v1/admin/coupons` lists them with `uses`. Codes look like `UCAST-K7Q2-XM4P` and are
+  compared ignoring case, spaces and dashes. `maxUses > 1` makes a shared code (a class); `expiresAt` is the last day
+  the code can be redeemed, not the end of the plan.
+- State: `coupons` in `accounts.json` (`usedBy` holds the account ids). Quotas follow the effective plan only when
+  billing is configured, like the plan limits.
+
+## E-mail log
+
+Every e-mail the accounts send (sign-up confirmation, reset, access key, coupon invitation) is recorded: when, to whom,
+subject, text and whether the provider accepted it (`ok: false` + `error` when it failed). The last 200 are kept, newest
+first, in `account-emails.json` next to `accounts.json`, and each one is also a log line (`accounts: e-mail`: to,
+subject, ok — never the body). The password-reset link (`/reset#token=…`) and activation keys (`ucast_live_…`) are
+replaced by `[oculto]` before anything is stored; confirmation and invitation links stay readable on purpose, so the
+admin can click them while debugging.
+
+- `GET /v1/admin/emails?limit=50` (admin key) and `GET /v1/account/emails?limit=50` (admin account session) →
+  `{ emails: [{ id, at, to, subject, text, ok, error? }] }`.
+- The admin area of `/account` lists them under "E-mails enviados": click "Ver" to read the text, with clickable links.

@@ -6,7 +6,7 @@ import { homedir } from 'os';
 import { join } from 'path';
 
 /** A metered quantity. `requests` is per UTC day; the others per UTC month. */
-export type QuotaMetric = 'audioSeconds' | 'llmTokens' | 'ttsChars' | 'rooms';
+export type QuotaMetric = 'audioSeconds' | 'llmTokens' | 'ttsChars' | 'ttsSeconds' | 'rooms';
 
 /** Per-user limits; 0 = unlimited. */
 export interface Quota {
@@ -16,6 +16,8 @@ export interface Quota {
   llmTokens: number;
   /** TTS input characters per UTC month. */
   ttsChars: number;
+  /** Dubbed audio per UTC month, in seconds (the plan states minutes; ~14 spoken characters make a second). */
+  ttsSeconds: number;
   /** Live rooms created per UTC month. */
   rooms: number;
   /** Metered requests per UTC day (429 when over), in the app budget's unit: a realtime session counts its whole charge. */
@@ -110,6 +112,7 @@ export function accountsConfigFromEnv(env: Record<string, string | undefined> = 
       audioSeconds: Math.floor(nonNegative(env.ACCOUNT_QUOTA_AUDIO_MINUTES_MONTH, 0) * 60),
       llmTokens: Math.floor(nonNegative(env.ACCOUNT_QUOTA_LLM_TOKENS_MONTH, 0)),
       ttsChars: Math.floor(nonNegative(env.ACCOUNT_QUOTA_TTS_CHARS_MONTH, 0)),
+      ttsSeconds: Math.floor(nonNegative(env.ACCOUNT_QUOTA_TTS_MINUTES_MONTH, 0) * 60),
       rooms: Math.floor(nonNegative(env.ACCOUNT_QUOTA_ROOMS_MONTH, 0)),
       requestsPerDay: Math.floor(nonNegative(env.ACCOUNT_QUOTA_REQUESTS_DAY, ACCOUNTS_DEFAULTS.QUOTA_REQUESTS_DAY)),
       concurrentRequests: Math.floor(nonNegative(env.ACCOUNT_QUOTA_CONCURRENT, ACCOUNTS_DEFAULTS.QUOTA_CONCURRENT)),

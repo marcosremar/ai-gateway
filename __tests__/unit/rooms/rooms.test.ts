@@ -60,8 +60,10 @@ async function startGateway(config: Partial<RoomsConfig> = {}, store: RoomStore 
 
 const json = { 'Content-Type': 'application/json' };
 
-async function createRoom(gw: Gw, body: unknown = { title: 'Aula', originalLang: 'pt', languages: ['en', 'es'] }, key = 'key-ucast') {
-  return fetch(`${gw.url}/v1/rooms`, { method: 'POST', headers: { ...json, Authorization: `Bearer ${key}` }, body: JSON.stringify(body) });
+async function createRoom(
+  gw: Gw, body: unknown = { title: 'Aula', originalLang: 'pt', languages: ['en', 'es'] }, key = 'key-ucast', extraHeaders: Record<string, string> = {},
+) {
+  return fetch(`${gw.url}/v1/rooms`, { method: 'POST', headers: { ...json, Authorization: `Bearer ${key}`, ...extraHeaders }, body: JSON.stringify(body) });
 }
 
 async function newRoom(gw: Gw): Promise<{ code: string; publishToken: string; url: string; expiresAt: string }> {
@@ -132,6 +134,22 @@ describe('rooms API', () => {
     expect(room.publishToken.length).toBeGreaterThanOrEqual(24);
     expect(room.url).toBe(`https://live.ucast.me/${room.code}`);
     expect(Date.parse(room.expiresAt) - gw.clock.now).toBe(30 * DAY);
+  });
+
+  it('an account keeps one live room at a time; ending it frees the slot; rooms with no account are untouched', async () => {
+    const first = await createRoom(gw, { languages: ['en'] }, 'key-ucast', { 'x-ucast-account': 'usr_aula' });
+    expect(first.status).toBe(201);
+    const firstBody = (await first.json()) as { code: string; publishToken: string };
+    const second = await createRoom(gw, { languages: ['en'] }, 'key-ucast', { 'x-ucast-account': 'usr_aula' });
+    expect(second.status).toBe(409);
+    expect(((await second.json()) as { error: { message: string } }).error.message).toContain('uma sala ao vivo');
+    // Outra conta: cada uma tem a sua.
+    expect((await createRoom(gw, { languages: ['en'] }, 'key-ucast', { 'x-ucast-account': 'usr_outro' })).status).toBe(201);
+    // Encerrar a primeira libera a conta.
+    expect((await post(gw, firstBody.code, 'end', {}, firstBody.publishToken)).status).toBe(204);
+    expect((await createRoom(gw, { languages: ['en'] }, 'key-ucast', { 'x-ucast-account': 'usr_aula' })).status).toBe(201);
+    // Sem conta (outras apps do gateway): como antes, sem a regra.
+    expect((await createRoom(gw, { languages: ['en'] })).status).toBe(201);
   });
 
   it('rejects a bad create body', async () => {

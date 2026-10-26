@@ -31,6 +31,8 @@ export interface RoomMeta {
   tokenHash: string;
   /** Gateway key user that created the room (may publish with its key instead of the token). */
   ownerId: string;
+  /** Aditivo: a conta do ucast.me que criou a sala (o gateway injeta o id na criação). Ausente nas salas antigas = sem conta; essas não entram na regra de uma por vez. */
+  accountId?: string;
   /** Additive: the presenter's YouTube watch link (validated, https on a YouTube host); absent in older metas = none. */
   youtubeUrl?: string | null;
   /** Additive: false = the gateway never voices this room's lines itself (absent = true). */

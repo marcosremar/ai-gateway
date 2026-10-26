@@ -114,6 +114,17 @@ export class RoomService {
 
   // ── Create ────────────────────────────────────────────────────────────────
 
+  /** Salas ATIVAS da conta: criadas, não encerradas e dentro da retenção. */
+  private activeRoomsOf(accountId: string): number {
+    const now = this.now();
+    let n = 0;
+    for (const room of this.rooms.values()) {
+      const m = room.meta;
+      if (m.accountId === accountId && !m.ended && m.lastActivityAt + this.config.retentionMs > now) n++;
+    }
+    return n;
+  }
+
   /** Rate limit: `maxRoomsPerHour` creations per key user in a rolling hour. */
   private admitCreate(ownerId: string): void {
     const now = this.now();
@@ -125,8 +136,16 @@ export class RoomService {
     this.created.set(ownerId, recent);
   }
 
-  async create(input: CreateRoomInput, ownerId: string): Promise<{ code: string; publishToken: string; url: string; expiresAt: string }> {
+  async create(input: CreateRoomInput, ownerId: string, accountId?: string): Promise<{ code: string; publishToken: string; url: string; expiresAt: string }> {
     this.admitCreate(ownerId);
+    // A conta do ucast.me tem UMA sala ao vivo por vez (o app transmite uma
+    // sessão de cada vez; a sala aguenta centenas de espectadores). Salas
+    // antigas sem conta não entram na regra. Numa sala dormente depois de um
+    // restart do gateway (só volta à memória quando alguém abre) a regra pode
+    // passar — ela expira sem atividade como qualquer outra.
+    if (accountId && this.activeRoomsOf(accountId) >= 1) {
+      throw new RoomError(409, 'Você já tem uma sala ao vivo aberta — só uma por vez. Encerre a atual para abrir outra.');
+    }
     let code = newCode();
     for (let i = 0; i < 20 && (this.rooms.has(code) || await this.opts.store.exists(code)); i++) code = newCode();
     if (this.rooms.has(code)) throw new RoomError(503, 'could not allocate a room code, retry');
@@ -136,6 +155,7 @@ export class RoomService {
       version: 1, code, title: input.title, originalLang: input.originalLang, languages: input.languages,
       createdAt: now, lastActivityAt: now, ended: false, endedAt: null, tokenHash: hashToken(publishToken), ownerId,
       youtubeUrl: input.youtubeUrl,
+      ...(accountId ? { accountId } : {}),
       ...(input.serverDub ? {} : { serverDub: false }),
     };
     await this.opts.store.saveMeta(meta);
