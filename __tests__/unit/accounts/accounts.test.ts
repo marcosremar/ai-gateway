@@ -863,6 +863,19 @@ describe('coupons (a paid plan for a few months, no card)', () => {
     expect(after.quota.limits.audioSeconds).toBe(2 * 3600);
   });
 
+  it('wants the e-mail confirmed before a code is used, and the invitation footer does not claim an account exists', async () => {
+    const gw = await startGateway({ adminEmails: ['dono@ucast.me'] });
+    const [coupon] = await makeCoupons(gw);
+    const ana = await signup(gw, 'ana@example.com', 'senha-forte-123', false);
+    const early = await redeem(gw, ana, coupon!.code);
+    expect(early.status).toBe(403);
+    expect(early.json.error.code).toBe('email_not_verified');
+    gw.mails.length = 0;
+    await call(gw, 'POST', '/v1/admin/coupons', { headers: adminHeaders, body: { emails: ['novo@example.com'] } });
+    expect(gw.mails[0]!.text).toContain('convidou este endereço');
+    expect(gw.mails[0]!.text).not.toContain('há uma conta');
+  });
+
   it('refuses unknown, used and second codes and codes past their date', async () => {
     const gw = await startGateway();
     const ana = await signup(gw);

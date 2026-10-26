@@ -539,6 +539,7 @@ export class AccountService {
   }
 
   async redeemCoupon(user: User, raw: unknown): Promise<PlanGrant> {
+    if (user.emailUnverified) throw new AccountError(403, 'Confirme seu e-mail antes de usar um código.', 'email_not_verified');
     const wanted = typeof raw === 'string' ? couponKey(raw) : '';
     const coupon = wanted ? this.state.coupons.find(c => couponKey(c.code) === wanted) : undefined;
     if (!coupon) throw new AccountError(404, 'Código inválido.', 'invalid_coupon');
