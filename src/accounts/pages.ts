@@ -18,7 +18,6 @@ const esc = (s: string) => s.replace(/[&<>"']/g, c => HTML_ESCAPES[c] ?? c);
 const js = (v: unknown) => JSON.stringify(v).replace(/</g, '\\u003c');
 
 const ICON = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='16' fill='%234cc3cb'/%3E%3Ccircle cx='16' cy='16' r='9.33' fill='none' stroke='%230a1012' stroke-width='4'/%3E%3C/svg%3E";
-const DUB_CHARS_PER_SECOND = 14;
 const LOGO_MARK = '<svg viewBox="0 0 32 32" aria-hidden="true" focusable="false"><circle cx="16" cy="16" r="16" fill="#4cc3cb"/><circle cx="16" cy="16" r="9.33" fill="none" stroke="#0a1012" stroke-width="4"/></svg>';
 
 /** The logo always goes to the public landing page, even on the account hosts. */
@@ -373,7 +372,7 @@ export function dashboardPage(links: PageLinks): RenderedPage {
 <input id="xpw" type="password" autocomplete="current-password" placeholder="${esc(t.deletePassword)}" required>
 <button id="xb" class="btn danger" type="submit">${t.deleteButton}</button></form>
 <div id="xm" class="msg" role="alert" aria-live="polite"></div></section></details>`;
-  const plans = Object.values(PLANS).map(p => ({ id: p.id, price: p.priceCents / 100, hours: p.quota.audioSeconds / 3600, dubMinutes: Math.round(p.quota.ttsChars / DUB_CHARS_PER_SECOND / 60), rooms: p.quota.rooms }));
+  const plans = Object.values(PLANS).map(p => ({ id: p.id, price: p.priceCents / 100, hours: p.quota.audioSeconds / 3600, dubMinutes: Math.round(p.quota.ttsSeconds / 60), rooms: p.quota.rooms }));
   const script = `(function(){
 var gm=$('gm'),km=$('km'),ADMIN=false,BILLING=false,PLAN='free',PLANS=${js(plans)},WANT=new URLSearchParams(location.search).get('plan');
 function minutes(s){return (s/60).toLocaleString(L.locale,{maximumFractionDigits:s<600?1:0})}
@@ -408,14 +407,14 @@ var lim=q.limits;PLAN=q.plan;
 $('plan').textContent=(BILLING?(L.planNames[q.plan]||q.plan):(q.plan==='free'?L.freePlan:q.plan))+' · '+L.renewsOn+' '+day(q.monthResetsAt)+(q.viaCoupon?' · '+L.couponUntil+' '+day(q.grantEndsAt):'');
 var s=$('stats');s.textContent='';
 s.appendChild(stat(L.minutesSubtitled,minutes(mo.audioSeconds),'min',lim.audioSeconds>0?hours(lim.audioSeconds/3600):''));
-s.appendChild(stat(L.minutesDubbed,minutes(mo.ttsSeconds||0),'min',lim.ttsChars>0?dubbing(Math.round(lim.ttsChars/${DUB_CHARS_PER_SECOND}/60)):''));
+s.appendChild(stat(L.minutesDubbed,minutes(mo.ttsSeconds||0),'min',lim.ttsSeconds>0?dubbing(Math.round(lim.ttsSeconds/60)):''));
 s.appendChild(stat(L.liveRooms,n(mo.rooms),'',lim.rooms>0?n(lim.rooms):''));
-var used=Math.max(lim.audioSeconds>0?mo.audioSeconds/lim.audioSeconds:0,lim.ttsChars>0?mo.ttsChars/lim.ttsChars:0,lim.rooms>0?mo.rooms/lim.rooms:0);
+var used=Math.max(lim.audioSeconds>0?mo.audioSeconds/lim.audioSeconds:0,lim.ttsSeconds>0?(mo.ttsSeconds||0)/lim.ttsSeconds:0,lim.rooms>0?mo.rooms/lim.rooms:0);
 if(BILLING&&used>=0.8){var order=['free','pro','events'];WANT=WANT||order[order.indexOf(q.plan)+1]||null}
 if(BILLING)renderPlans(q);
 if(BILLING&&used>=1)show($('bm'),L.limitReached);else if(BILLING&&used>=0.8)show($('bm'),fill(L.limitNear,{p:Math.floor(used*100)}));
 if(!ADMIN)return;var tb=$('days').tBodies[0];tb.textContent='';u.days.slice().reverse().forEach(function(d){if(!d.requests&&!d.rooms)return;var tr=document.createElement('tr');
-[new Date(d.day+'T12:00:00Z').toLocaleDateString(L.locale),minutes(d.audioSeconds)+' min',n(d.llmTokens),n(d.ttsChars),n(d.rooms),n(d.requests)].forEach(function(t){var td=document.createElement('td');td.textContent=t;tr.appendChild(td)});tb.appendChild(tr)});
+[new Date(d.day+'T12:00:00Z').toLocaleDateString(L.locale),minutes(d.audioSeconds)+' min',n(d.llmTokens),minutes(d.ttsSeconds||0)+' min',n(d.rooms),n(d.requests)].forEach(function(t){var td=document.createElement('td');td.textContent=t;tr.appendChild(td)});tb.appendChild(tr)});
 if(!tb.rows.length){var tr=document.createElement('tr');var td=document.createElement('td');td.colSpan=6;td.className='meta';td.textContent=L.noUsage;tr.appendChild(td);tb.appendChild(tr)}})}
 function hours(h){return n(h)+' h'}
 function dubbing(m){return m>=60?n(m/60)+' h':n(m)+' min'}
