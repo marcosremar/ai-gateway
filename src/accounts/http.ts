@@ -406,7 +406,19 @@ export function createAccountsHttp(opts: AccountsHttpOptions) {
         const body = await readJson(req);
         const { user } = await service.activate(body.key, body.deviceName, body.appVersion);
         const q = service.quotaView(user);
-        send(res, 200, { ok: true, email: user.email, plan: user.plan, quota: { limits: q.limits, month: q.month, monthResetsAt: q.monthResetsAt } });
+        send(res, 200, {
+          ok: true,
+          email: user.email,
+          // O plano EFETIVO (o cupom conta): /me e /activate dizem o mesmo.
+          plan: q.plan,
+          quota: {
+            limits: q.limits,
+            month: q.month,
+            monthResetsAt: q.monthResetsAt,
+            ...(q.viaCoupon ? { viaCoupon: true, grantEndsAt: q.grantEndsAt } : {}),
+            ...(q.planRenewsAt ? { planRenewsAt: q.planRenewsAt, planCancelsAtPeriodEnd: q.planCancelsAtPeriodEnd } : {}),
+          },
+        });
         return;
       }
       default: break;

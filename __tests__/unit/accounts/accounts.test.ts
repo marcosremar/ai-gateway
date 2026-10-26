@@ -864,6 +864,20 @@ describe('coupons (a paid plan for a few months, no card)', () => {
     expect(after.quota.limits.audioSeconds).toBe(2 * 3600);
   });
 
+  it('the activation answer says the coupon plan and when it ends (the desktop app reads this)', async () => {
+    const gw = await startGateway();
+    const ana = await signup(gw);
+    const { key } = await newKey(gw, ana);
+    const plain = await call(gw, 'POST', '/v1/activate', { body: { key } });
+    expect(plain.json).toMatchObject({ plan: 'free' });
+    expect(plain.json.quota.viaCoupon).toBeUndefined();
+    const [coupon] = await makeCoupons(gw);
+    expect((await redeem(gw, ana, coupon!.code)).status).toBe(200);
+    const act = await call(gw, 'POST', '/v1/activate', { body: { key } });
+    expect(act.status).toBe(200);
+    expect(act.json).toMatchObject({ plan: 'pro', quota: { viaCoupon: true, grantEndsAt: '2027-01-10T12:00:00.000Z' } });
+  });
+
   it('wants the e-mail confirmed before a code is used, and the invitation footer does not claim an account exists', async () => {
     const gw = await startGateway({ adminEmails: ['dono@ucast.me'] });
     const [coupon] = await makeCoupons(gw);
