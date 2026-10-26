@@ -836,6 +836,17 @@ describe('coupons (a paid plan for a few months, no card)', () => {
     expect((await call(gw, 'POST', '/v1/admin/coupons', { headers: adminHeaders, body: { plan: 'free' } })).status).toBe(400);
   });
 
+  it('the admin key can create and e-mail invitations in one call, in the chosen language', async () => {
+    const gw = await startGateway();
+    await signup(gw, 'ana@example.com');
+    gw.mails.length = 0;
+    const r = await call(gw, 'POST', '/v1/admin/coupons', { headers: adminHeaders, body: { emails: ['ana@example.com', 'novo@example.com'], lang: 'fr', months: 3 } });
+    expect(r.status).toBe(201);
+    expect(r.json.skipped).toEqual(['ana@example.com']);
+    expect(r.json.coupons).toHaveLength(1);
+    expect(gw.mails.map(m => [m.to, m.subject])).toEqual([['novo@example.com', 'Votre code ucast.me']]);
+  });
+
   it('gives Pro for 3 months with no card, applies the Pro limits and returns to Free afterwards', async () => {
     const gw = await startGateway({}, { stripe: fakeStripe().fetchImpl });
     const s = await signup(gw);
