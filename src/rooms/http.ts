@@ -20,7 +20,7 @@ import { readFileSync } from 'fs';
 import { FONT_PATHS } from './font-files';
 import { entryPage, notFoundPage, pageCsp, roomPage, type RenderedPage } from './page';
 import { EVENTS_MAX_BYTES, parseEventBatch, type RoomEvents } from './events';
-import { appIdOf, type RoomService } from './service';
+import { appIdOf, type LiveRoom, type RoomService } from './service';
 import { RoomError, VOICE_MAX_BYTES, normalizeCode, parseAudio, parseCreate, parseLine, parseUpdate, parseVoice } from './validate';
 
 export type KeyUser = (token: string) => { userId: string; admin: boolean } | null;
@@ -122,7 +122,7 @@ function hostOf(req: IncomingMessage): string {
 }
 
 /** Client address for the events rate limit only (hashed in memory, never stored): first X-Forwarded-For hop. */
-function clientIp(req: IncomingMessage): string {
+export function clientIp(req: IncomingMessage): string {
   const fwd = String(req.headers['x-forwarded-for'] ?? '').split(',')[0]!.trim();
   return fwd || req.socket.remoteAddress || 'unknown';
 }
@@ -163,9 +163,9 @@ export function createRoomsHttp(opts: RoomsHttpOptions) {
     } catch (err) { fail(res, err, 'create'); }
   }
 
-  async function page(res: ServerResponse, rawCode: string, basePath: string): Promise<void> {
+  async function page(req: IncomingMessage, res: ServerResponse, rawCode: string, basePath: string): Promise<void> {
     const code = normalizeCode(rawCode);
-    const room = code ? await service.get(code) : null;
+    const room = await service.lookup(code, clientIp(req));
     const pageOpts = { basePath, retentionDays };
     if (!room || !code) { sendPage(res, 404, notFoundPage(pageOpts, code)); return; }
     sendPage(res, 200, roomPage(code, pageOpts, appIdOf(room.meta.ownerId)));
@@ -181,7 +181,9 @@ export function createRoomsHttp(opts: RoomsHttpOptions) {
     if (action === 'ws') { sendError(res, 426, 'this path is a WebSocket', { Upgrade: 'websocket' }); return; }
     if (action === 'events' && method === 'GET') { await listEvents(req, res, rawCode); return; }
     const code = normalizeCode(rawCode);
-    const room = code ? await service.get(code) : null;
+    const bearer = bearerToken(req.headers.authorization);
+    const publishes = (r: LiveRoom) => { try { service.authorizePublish(r, bearer, opts.keyUser); return true; } catch { return false; } };
+    const room = await service.lookup(code, clientIp(req), bearer ? publishes : undefined);
     if (!room) { req.resume(); sendError(res, 404, 'room not found or expired'); return; }
     if (action === undefined && method !== 'PATCH') { sendJson(res, 200, service.publicView(room)); return; }
     if (action === 'events') {
@@ -266,11 +268,11 @@ export function createRoomsHttp(opts: RoomsHttpOptions) {
       if (path === '/') { sendPage(res, 200, entryPage({ basePath: '/', retentionDays })); return true; }
       const hostCode = HOST_CODE_PATH.exec(path)?.[1];
       // Only the room-code alphabet: "/health" and other 6-letter paths keep reaching the proxy.
-      if (hostCode && normalizeCode(hostCode)) return run(page(res, hostCode, '/'), 'page');
+      if (hostCode && normalizeCode(hostCode)) return run(page(req, res, hostCode, '/'), 'page');
     }
     if (path === '/live' || path === '/live/') { sendPage(res, 200, entryPage({ basePath: '/live/', retentionDays })); return true; }
     const liveCode = LIVE_PATH.exec(path)?.[1];
-    if (liveCode) return run(page(res, liveCode, '/live/'), 'page');
+    if (liveCode) return run(page(req, res, liveCode, '/live/'), 'page');
     return false;
   }
 

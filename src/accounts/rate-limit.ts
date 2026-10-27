@@ -35,6 +35,12 @@ export class AttemptLimiter {
     return h.count > w.limit ? Math.max(1, Math.ceil((h.resetAt - now) / 1000)) : 0;
   }
 
+  /** True when the bucket already used its whole window, without counting. */
+  blocked(bucket: string, w: Window): boolean {
+    const h = this.hits.get(bucket);
+    return !!h && h.resetAt > this.now() && h.count >= w.limit;
+  }
+
   /** Forgets a bucket (a successful login clears its e-mail's failures). */
   clear(bucket: string): void {
     this.hits.delete(bucket);

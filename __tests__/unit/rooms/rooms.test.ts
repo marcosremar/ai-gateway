@@ -136,6 +136,18 @@ describe('rooms API', () => {
     expect(Date.parse(room.expiresAt) - gw.clock.now).toBe(30 * DAY);
   });
 
+  it('Z2: an address that keeps guessing unknown codes is refused, also on a real room, so codes cannot be swept', async () => {
+    const room = await newRoom(gw);
+    const guesses = Array.from({ length: 60 }, (_, i) => `ZZZZ${'ABCDEFGHJKMNPQRSTUVWXYZ23456789'[i % 31]}${'23456789'[Math.floor(i / 31)]}`);
+    for (const code of guesses) expect((await fetch(`${gw.url}/v1/rooms/${code}`)).status).toBe(404);
+    expect((await fetch(`${gw.url}/v1/rooms/${room.code}`)).status).toBe(429);
+    expect((await rawGet(gw, `/${room.code}`, 'live.ucast.me')).status).toBe(429);
+    expect(await refusedStatus(gw, room.code)).toBe(429);
+    expect((await post(gw, room.code, 'lines', line(1), room.publishToken)).status).toBe(204);
+    gw.clock.now += 10 * 60_000;
+    expect((await fetch(`${gw.url}/v1/rooms/${room.code}`)).status).toBe(200);
+  });
+
   it('an account keeps one live room at a time; ending it frees the slot; rooms with no account are untouched', async () => {
     const first = await createRoom(gw, { languages: ['en'] }, 'key-ucast', { 'x-ucast-account': 'usr_aula' });
     expect(first.status).toBe(201);

@@ -12,7 +12,8 @@ import {
   OP, WsFrameParser, WsProtocolError, closePayload, encodeFrame, handshakeResponse, httpRefusal,
 } from '../realtime/ws-frames';
 import type { RoomService, RoomViewer } from './service';
-import { normalizeCode } from './validate';
+import { RoomError, normalizeCode } from './validate';
+import { clientIp } from './http';
 
 export const ROOM_WS_PATH = /^\/v1\/rooms\/([A-Za-z0-9]{1,16})\/ws\/?$/;
 const MAX_CLIENT_MESSAGE = 4 * 1024;
@@ -39,7 +40,11 @@ export function createRoomWs(service: RoomService, log: (msg: string, data?: Rec
     const key = req.headers['sec-websocket-key'];
     if (typeof key !== 'string' || req.headers['sec-websocket-version'] !== '13') { socket.end(httpRefusal(400, 'not a WebSocket 13 upgrade')); return; }
     const code = normalizeCode(rawCode);
-    const room = code ? await service.get(code) : null;
+    const room = await service.lookup(code, clientIp(req)).catch((err: unknown) => {
+      if (err instanceof RoomError && err.status === 429) { socket.end(httpRefusal(429, err.message, { 'Retry-After': 60 })); return undefined; }
+      throw err;
+    });
+    if (room === undefined) return;
     if (!room) { socket.end(httpRefusal(404, 'room not found or expired')); return; }
     if (socket.destroyed) return;
 
