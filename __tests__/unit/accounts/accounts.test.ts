@@ -1037,14 +1037,36 @@ describe('account page script', () => {
       ?.map((d) => (typeof d.messageText === 'string' ? d.messageText : d.messageText.messageText)) ?? [];
   };
 
+  /**
+   * Every inline `<script>` body of an HTML page. Not a regular expression: the tag name, its attributes and the end
+   * tag may all carry spaces or different case (`<SCRIPT defer>`, `</script >`), which a pattern like
+   * `<script[^>]*>(.*?)</script>` misses (CodeQL js/bad-tag-filter).
+   */
+  const inlineScripts = (html: string): string[] => {
+    const out: string[] = [];
+    const open = /<script\b[^>]*>/gi;
+    for (let m = open.exec(html); m; m = open.exec(html)) {
+      const from = m.index + m[0].length;
+      const close = /<\/script\s*>/gi;
+      close.lastIndex = from;
+      const end = close.exec(html);
+      if (!end) break;
+      const body = html.slice(from, end.index).trim();
+      // `<script src=…></script>` has no body to check.
+      if (body) out.push(body);
+      open.lastIndex = end.index + end[0].length;
+    }
+    return out;
+  };
+
   it.each(['pt', 'en', 'fr'])('is valid JavaScript in %s and carries the coupon card and the admin panel', async (lang) => {
     const gw = await startGateway();
     const signupPage = await call(gw, 'GET', '/signup', { host: SITE, headers: { 'Accept-Language': lang } });
-    for (const source of [...signupPage.text.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/gi)].map(m => m[1]!).filter(Boolean)) expect(scriptErrors(source)).toEqual([]);
+    for (const source of inlineScripts(signupPage.text)) expect(scriptErrors(source)).toEqual([]);
     expect(signupPage.text).toContain('id="inv"');
     const page = await call(gw, 'GET', '/account', { host: SITE, headers: { 'Accept-Language': lang } });
     expect(page.status).toBe(200);
-    const scripts = [...page.text.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/gi)].map(m => m[1]!).filter(Boolean);
+    const scripts = inlineScripts(page.text);
     expect(scripts.length).toBeGreaterThan(0);
     for (const source of scripts) expect(scriptErrors(source)).toEqual([]);
     for (const id of ['cf', 'cc', 'cb', 'cm', 'cpf', 'cpb', 'cam', 'coupons']) expect(page.text).toContain(`id="${id}"`);
