@@ -159,7 +159,7 @@ const EN: PageStrings = {
       key_not_found: 'Key not found.', user_not_found: 'User not found.', not_signed_in: 'Your session has ended. Sign in again.',
       csrf_failed: 'Your session has ended. Reload the page.', cross_site: 'Request from another site refused.',
       not_admin: 'Only administrators can do this.',
-      invalid_verify_token: 'This confirmation link is invalid or has expired. Request a new one from your account.', email_not_verified: 'Confirm your e-mail before creating a key.', wrong_password: 'Wrong password.',
+      invalid_verify_token: 'This confirmation link is invalid or has expired. Request a new one from your account.', email_not_verified: 'Confirm your e-mail before creating a key.', wrong_password: 'Wrong password.', email_send_failed: 'We could not send the e-mail right now. Try again in a few minutes.',
     },
   },
 };
@@ -246,7 +246,7 @@ const FR: PageStrings = {
       key_not_found: 'Clé introuvable.', user_not_found: 'Utilisateur introuvable.', not_signed_in: 'Votre session a expiré. Reconnectez-vous.',
       csrf_failed: 'Votre session a expiré. Rechargez la page.', cross_site: 'Requête d’un autre site refusée.',
       not_admin: 'Réservé aux administrateurs.',
-      invalid_verify_token: 'Ce lien de confirmation est invalide ou a expiré. Demandez-en un nouveau depuis votre compte.', email_not_verified: 'Confirmez votre e-mail avant de créer une clé.', wrong_password: 'Mot de passe incorrect.',
+      invalid_verify_token: 'Ce lien de confirmation est invalide ou a expiré. Demandez-en un nouveau depuis votre compte.', email_not_verified: 'Confirmez votre e-mail avant de créer une clé.', wrong_password: 'Mot de passe incorrect.', email_send_failed: 'Impossible d’envoyer l’e-mail pour le moment. Réessayez dans quelques minutes.',
     },
   },
 };

@@ -91,13 +91,13 @@ function signedEvent(event: unknown, nowMs: number, secret = WEBHOOK_SECRET) {
 
 const NO_QUOTA = { audioSeconds: 0, llmTokens: 0, ttsChars: 0, ttsSeconds: 0, rooms: 0, requestsPerDay: 0, concurrentRequests: 0 };
 
-interface GwOpts { adminApp?: boolean; dir?: string; appEnv?: Record<string, string>; sessionRequests?: number; hold?: Promise<void>; stripe?: typeof fetch }
+interface GwOpts { mailDown?: { on: boolean }; adminApp?: boolean; dir?: string; appEnv?: Record<string, string>; sessionRequests?: number; hold?: Promise<void>; stripe?: typeof fetch }
 
 async function startGateway(config: Partial<AccountsConfig> = {}, opts: GwOpts = {}): Promise<Gw> {
   const clock = { now: Date.UTC(2026, 9, 10, 12) };
   const dir = opts.dir ?? mkdtempSync(join(tmpdir(), 'accounts-'));
   const mails: EmailMessage[] = [];
-  const email: EmailSender = { configured: true, send: async (m) => { mails.push(m); } };
+  const email: EmailSender = { configured: true, send: async (m) => { if (opts.mailDown?.on) throw new Error('resend answered 503'); mails.push(m); } };
   const access = new AccessKeys({ GATEWAY_API_KEYS: `${ADMIN_KEY}:ops,${APP_KEY}:babelcast` }, { now: () => clock.now });
   access.setBaseAdmins(opts.adminApp ? ['ops', 'babelcast'] : ['ops']);
   const accounts = createAccounts({
@@ -454,6 +454,19 @@ describe('sign-up, login, session', () => {
     expect((await call(gw, 'POST', '/v1/account/verify', { body: { token } })).status).toBe(400);
     expect((await call(gw, 'GET', '/v1/account/me', { headers: { Cookie: s.cookie } })).json.emailVerified).toBe(true);
     await newKey(gw, s);
+  });
+
+  it('C7: when the e-mail service is down, asking for the confirmation again says it was not sent instead of "sent"', async () => {
+    const mailDown = { on: true };
+    const gw = await startGateway({}, { mailDown });
+    const s = await signup(gw, 'nova@example.com', 'senha-forte-123', false);
+    const headers = { Cookie: s.cookie, 'X-CSRF-Token': s.csrf };
+    const resend = await call(gw, 'POST', '/v1/account/verify/resend', { headers, body: {} });
+    expect(resend.status).toBe(502);
+    expect(resend.json.error.code).toBe('email_send_failed');
+    mailDown.on = false;
+    expect((await call(gw, 'POST', '/v1/account/verify/resend', { headers, body: {} })).status).toBe(200);
+    expect(takeVerification(gw, 'nova@example.com')).toBeTruthy();
   });
 
   it('deletes the account with its password: sessions, keys and usage go, the e-mail can sign up again', async () => {

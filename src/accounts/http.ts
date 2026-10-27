@@ -268,7 +268,7 @@ export function createAccountsHttp(opts: AccountsHttpOptions) {
         req.resume();
         limit(`verify:user:${w.user.id}`, ATTEMPT_LIMITS.verifyResendPerUser);
         await service.rememberLanguage(w.user, requestLang(req));
-        await service.sendVerification(w.user);
+        if (!await service.sendVerification(w.user)) throw new AccountError(502, 'Não conseguimos enviar o e-mail agora. Tente de novo em alguns minutos.', 'email_send_failed');
         send(res, 200, { ok: true });
         return;
       }

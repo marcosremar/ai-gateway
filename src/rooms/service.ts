@@ -9,6 +9,7 @@ import type { RoomsConfig } from './config';
 import { PCM_RATE, type LanguageTts, type TtsClip } from '../tts';
 import { RoomDubber, type RoomPocket, type RoomTranslate, type RoomVoiceClone } from './dub';
 import type { RoomStore } from './store';
+import { AttemptLimiter, type Window } from '../accounts/rate-limit';
 import type { PublicRoom, RoomLine, RoomMeta, RoomServerMessage } from './types';
 import {
   CODE_ALPHABET, CODE_LENGTH, RoomError, lineChars, type AudioInput, type CreateRoomInput, type UpdateRoomInput, type VoiceInput,
@@ -75,10 +76,13 @@ function newCode(): string {
 /** Public, opaque id of the app (gateway key user) that created a room: the room page keeps display settings per app. */
 export const appIdOf = (ownerId: string): string => createHash('sha256').update(ownerId).digest('hex').slice(0, 12);
 
+export const CODE_GUESSES: Window = { limit: 60, windowMs: 10 * 60_000 };
+
 export class RoomService {
   private readonly rooms = new Map<string, LiveRoom>();
   private readonly loading = new Map<string, Promise<LiveRoom | null>>();
   private readonly created = new Map<string, number[]>();
+  private readonly codeGuesses: AttemptLimiter;
   private readonly now: () => number;
   private readonly log: (msg: string, data?: Record<string, unknown>) => void;
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -86,6 +90,7 @@ export class RoomService {
 
   constructor(private readonly opts: RoomServiceOptions) {
     this.now = opts.now ?? Date.now;
+    this.codeGuesses = new AttemptLimiter(this.now);
     this.log = opts.log ?? (() => {});
     this.dubber = opts.synthesize && opts.config.serverDub
       ? new RoomDubber({
@@ -268,6 +273,15 @@ export class RoomService {
    * The room's publish token (constant-time compare of the hashes), or a gateway key whose user created the room or is
    * an admin (`keyUser` resolves the bearer as a gateway key; null when it is not one).
    */
+  /** Room for a request from `client`. Unknown codes count as guesses; an address over CODE_GUESSES gets 429 for every room it does not publish to, so codes cannot be swept. */
+  async lookup(code: string | null, client: string, publishes: (room: LiveRoom) => boolean = () => false): Promise<LiveRoom | null> {
+    const room = code ? await this.get(code) : null;
+    if (room && publishes(room)) return room;
+    if (this.codeGuesses.blocked(client, CODE_GUESSES)) throw new RoomError(429, 'too many unknown room codes from this address, slow down');
+    if (!room) this.codeGuesses.hit(client, CODE_GUESSES);
+    return room;
+  }
+
   authorizePublish(room: LiveRoom, bearer: string, keyUser: (token: string) => { userId: string; admin: boolean } | null): void {
     if (!bearer) throw new RoomError(401, 'missing Authorization: Bearer <publishToken>');
     const given = Buffer.from(hashToken(bearer), 'hex');

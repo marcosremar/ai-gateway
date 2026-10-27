@@ -310,14 +310,18 @@ export class AccountService {
 
   // ── E-mail verification and account deletion ─────────────────────────────
 
-  async sendVerification(user: User, welcome = false): Promise<void> {
-    if (!user.emailUnverified) return;
+  /** False when the e-mail service refused it (logged). */
+  async sendVerification(user: User, welcome = false): Promise<boolean> {
+    if (!user.emailUnverified) return true;
     const token = randomBytes(32).toString('base64url');
     this.state.verifications = this.state.verifications.filter(v => v.userId !== user.id);
     this.state.verifications.push({ hash: this.hash(token), userId: user.id, expiresAt: this.now() + VERIFY_TTL_MS });
     await this.save();
     const link = `${this.config.publicBaseUrl}/verify#token=${token}`;
-    await this.opts.email.send({ to: user.email, ...mails.verifyEmail(user.lang ?? 'pt', link, welcome, this.config.downloadUrl) }).catch((err: unknown) => this.opts.log?.('accounts: verification e-mail failed', { error: err instanceof Error ? err.message : String(err) }));
+    return this.opts.email.send({ to: user.email, ...mails.verifyEmail(user.lang ?? 'pt', link, welcome, this.config.downloadUrl) }).then(() => true, (err: unknown) => {
+      this.opts.log?.('accounts: verification e-mail failed', { error: err instanceof Error ? err.message : String(err) });
+      return false;
+    });
   }
 
   async verifyEmail(token: unknown): Promise<void> {

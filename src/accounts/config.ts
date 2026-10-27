@@ -84,7 +84,14 @@ function positive(raw: string | undefined, fallback: number): number {
   return n > 0 ? n : fallback;
 }
 
+function httpBaseUrl(raw: string | undefined, fallback: string): string {
+  const v = raw?.trim().replace(/\/+$/, '') ?? '';
+  try { return /^https?:$/.test(new URL(v).protocol) ? v : fallback; } catch { return fallback; }
+}
+
 export function accountsConfigFromEnv(env: Record<string, string | undefined> = process.env): AccountsConfig {
+  const publicBaseUrl = httpBaseUrl(env.ACCOUNTS_PUBLIC_BASE_URL, ACCOUNTS_DEFAULTS.PUBLIC_BASE_URL);
+  const cookieSecureEnv = env.ACCOUNTS_COOKIE_SECURE?.trim();
   // Same durable dir as access.json and the rooms (the Railway volume).
   const stateDir = env.DEPLOYMENTS_STATE_DIR || env.RAILWAY_VOLUME_MOUNT_PATH || join(homedir(), '.ai-gateway');
   const dir = env.ACCOUNTS_DIR?.trim() || stateDir;
@@ -94,9 +101,9 @@ export function accountsConfigFromEnv(env: Record<string, string | undefined> = 
     app: env.ACCOUNTS_APP?.trim() || ACCOUNTS_DEFAULTS.APP,
     wakeDeployments: (env.ACCOUNTS_WAKE_DEPLOYMENTS ?? ACCOUNTS_DEFAULTS.WAKE_DEPLOYMENTS).split(',').map(d => d.trim()).filter(Boolean),
     siteHosts: (env.ACCOUNTS_SITE_HOSTS ?? ACCOUNTS_DEFAULTS.SITE_HOSTS).split(',').map(h => h.trim().toLowerCase()).filter(Boolean),
-    publicBaseUrl: (env.ACCOUNTS_PUBLIC_BASE_URL?.trim() || ACCOUNTS_DEFAULTS.PUBLIC_BASE_URL).replace(/\/+$/, ''),
+    publicBaseUrl,
     downloadUrl: env.ACCOUNTS_DOWNLOAD_URL?.trim() || ACCOUNTS_DEFAULTS.DOWNLOAD_URL,
-    cookieSecure: env.ACCOUNTS_COOKIE_SECURE?.trim() !== '0',
+    cookieSecure: cookieSecureEnv ? cookieSecureEnv !== '0' : publicBaseUrl.startsWith('https://'),
     sessionTtlMs: positive(env.ACCOUNTS_SESSION_DAYS, ACCOUNTS_DEFAULTS.SESSION_DAYS) * 86_400_000,
     resetTtlMs: positive(env.ACCOUNTS_RESET_MINUTES, ACCOUNTS_DEFAULTS.RESET_MINUTES) * 60_000,
     maxKeysPerUser: Math.floor(positive(env.ACCOUNTS_MAX_KEYS_PER_USER, ACCOUNTS_DEFAULTS.MAX_KEYS_PER_USER)),
