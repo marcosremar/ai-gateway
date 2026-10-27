@@ -533,11 +533,11 @@ export function desktopPage(links: PageLinks): RenderedPage {
   const body = `<div class="narrow"><h1>${esc(t.desktopHeading)}</h1>
 <p class="lead" id="lead">${esc(t.desktopLead)}</p>
 <div id="m" class="msg" role="alert" aria-live="polite"></div>
-<p class="btnrow"><a id="go" class="btn" href="${esc(links.account)}" hidden>${esc(t.goAccount)}</a></p></div>`;
+<p class="btnrow"><button id="ok" class="btn" type="button" hidden></button><a id="go" class="btn" href="${esc(links.account)}" hidden>${esc(t.goAccount)}</a></p></div>`;
   const script = `(function(){
-var m=$('m'),lead=$('lead'),go=$('go');
+var m=$('m'),lead=$('lead'),go=$('go'),ok=$('ok');
 var q=new URLSearchParams(location.search);
-var port=q.get('port')||'', state=q.get('state')||'', device=(q.get('device')||'').trim()||L.defaultPc, post=q.get('post')==='1';
+var port=q.get('port')||'', state=q.get('state')||'', device=(q.get('device')||'').trim().slice(0,60)||L.defaultPc, post=q.get('post')==='1';
 var p=parseInt(port,10);
 function fail(text){lead.hidden=true;show(m,text);go.hidden=false}
 if(!state||!/^[A-Za-z0-9_-]{8,128}$/.test(state)){fail(L.desktopBadLink);return}
@@ -548,7 +548,10 @@ if(r.status===401){location.replace(loginNext);return}
 if(!r.ok){fail(errText(r));return}
 CSRF=r.body.csrfToken||'';
 if(r.body.emailVerified===false){fail(L.desktopNeedVerify);return}
-lead.textContent=L.desktopCreating;
+lead.textContent=fill(L.desktopConfirm,{device:device});
+ok.textContent=L.desktopAuthorize;ok.hidden=false;
+ok.addEventListener('click',function(){
+ok.hidden=true;lead.textContent=L.desktopCreating;
 api('/v1/account/keys','POST',{deviceName:device}).then(function(r2){
 if(!r2.ok){fail(errText(r2));return}
 var key=r2.body.key;
@@ -559,6 +562,7 @@ if(post){var f=document.createElement('form');f.method='POST';f.action='http://1
 document.body.appendChild(f);f.submit();return}
 location.replace('http://127.0.0.1:'+p+'/?key='+encodeURIComponent(key)+'&state='+encodeURIComponent(state));
 },function(){fail(L.offline)});
+});
 },function(){fail(L.offline)});
 })();`;
   return { html: shell(t.desktopTitle, body, script, nonce, links), nonce, formAction: DESKTOP_RETURN_ORIGIN };
