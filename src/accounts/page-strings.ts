@@ -70,6 +70,7 @@ const PT = {
     desktopBadLink: 'Link incompleto. Volte ao app e clique de novo em “Entrar na conta”.',
     desktopNeedVerify: 'Confirme seu e-mail antes de ativar o app — abra o link que enviamos.',
     desktopCreating: 'Criando a chave deste computador…', desktopSending: 'Enviando a chave para o app…',
+    desktopConfirm: 'Autorizar o computador “{device}” a usar sua conta ucast.me? Só continue se foi você que abriu o app agora.', desktopAuthorize: 'Autorizar este computador',
     errors: {} as Record<string, string>,
   },
 };
@@ -146,6 +147,7 @@ const EN: PageStrings = {
     desktopBadLink: 'Incomplete link. Go back to the app and click “Sign in to your account” again.',
     desktopNeedVerify: 'Confirm your e-mail before activating the app — open the link we sent.',
     desktopCreating: 'Creating the key for this computer…', desktopSending: 'Sending the key to the app…',
+    desktopConfirm: 'Authorize the computer “{device}” to use your ucast.me account? Continue only if you just opened the app yourself.', desktopAuthorize: 'Authorize this computer',
     errors: {
       coupon_email_registered: 'This e-mail already has an account.', coupon_email_mismatch: 'This invitation is for a different e-mail.', invalid_coupon_input: 'Check the numbers you entered.', invalid_coupon: 'Invalid code.', coupon_expired: 'This code has expired.', coupon_used: 'This code has already been used.', coupon_already_redeemed: 'This account has already used a code.',
       invalid_credentials: 'Wrong e-mail or password.', invalid_email: 'Enter a valid e-mail.',
@@ -232,6 +234,7 @@ const FR: PageStrings = {
     desktopBadLink: 'Lien incomplet. Revenez à l’appli et cliquez de nouveau sur « Se connecter au compte ».',
     desktopNeedVerify: 'Confirmez votre e-mail avant d’activer l’appli — ouvrez le lien que nous avons envoyé.',
     desktopCreating: 'Création de la clé de cet ordinateur…', desktopSending: 'Envoi de la clé à l’appli…',
+    desktopConfirm: 'Autoriser l’ordinateur « {device} » à utiliser votre compte ucast.me ? Continuez seulement si vous venez d’ouvrir l’appli vous-même.', desktopAuthorize: 'Autoriser cet ordinateur',
     errors: {
       coupon_email_registered: 'Cet e-mail a déjà un compte.', coupon_email_mismatch: 'Cette invitation est pour une autre adresse e-mail.', invalid_coupon_input: 'Vérifiez les nombres saisis.', invalid_coupon: 'Code invalide.', coupon_expired: 'Ce code a expiré.', coupon_used: 'Ce code a déjà été utilisé.', coupon_already_redeemed: 'Ce compte a déjà utilisé un code.',
       invalid_credentials: 'E-mail ou mot de passe incorrect.', invalid_email: 'Saisissez un e-mail valide.',
