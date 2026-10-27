@@ -67,7 +67,7 @@ function sendError(res: ServerResponse, err: AccountError, headers: Record<strin
 function sendPage(res: ServerResponse, status: number, page: RenderedPage): void {
   res.writeHead(status, {
     'Content-Type': 'text/html; charset=utf-8', 'Content-Length': Buffer.byteLength(page.html),
-    'Content-Security-Policy': accountPageCsp(page.nonce), 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer',
+    'Content-Security-Policy': accountPageCsp(page.nonce, page.formAction), 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer',
     'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY',
   });
   res.end(page.html);

@@ -6,7 +6,7 @@ import { randomBytes } from 'crypto';
 import { PAGE_STRINGS, type PageLang } from './page-strings';
 import { PLANS } from './plans';
 
-export interface RenderedPage { html: string; nonce: string }
+export interface RenderedPage { html: string; nonce: string; formAction?: string }
 
 export interface PageLinks {
   home: string; signup: string; login: string; forgot: string; reset: string; verify: string; account: string;
@@ -23,10 +23,12 @@ const LOGO_MARK = '<svg viewBox="0 0 32 32" aria-hidden="true" focusable="false"
 /** The logo always goes to the public landing page, even on the account hosts. */
 const LANDING_URL = 'https://ucast.me/';
 
-export function accountPageCsp(nonce: string): string {
+export const DESKTOP_RETURN_ORIGIN = 'http://127.0.0.1:*';
+
+export function accountPageCsp(nonce: string, formAction?: string): string {
   return [
     "default-src 'none'", `script-src 'nonce-${nonce}'`, `style-src 'nonce-${nonce}'`, "connect-src 'self'", 'img-src data:', "font-src 'self'",
-    "base-uri 'none'", "form-action 'self'", "frame-ancestors 'none'",
+    "base-uri 'none'", `form-action 'self'${formAction ? ` ${formAction}` : ''}`, "frame-ancestors 'none'",
   ].join('; ');
 }
 
@@ -535,7 +537,7 @@ export function desktopPage(links: PageLinks): RenderedPage {
   const script = `(function(){
 var m=$('m'),lead=$('lead'),go=$('go');
 var q=new URLSearchParams(location.search);
-var port=q.get('port')||'', state=q.get('state')||'', device=(q.get('device')||'').trim()||L.defaultPc;
+var port=q.get('port')||'', state=q.get('state')||'', device=(q.get('device')||'').trim()||L.defaultPc, post=q.get('post')==='1';
 var p=parseInt(port,10);
 function fail(text){lead.hidden=true;show(m,text);go.hidden=false}
 if(!state||!/^[A-Za-z0-9_-]{8,128}$/.test(state)){fail(L.desktopBadLink);return}
@@ -552,11 +554,14 @@ if(!r2.ok){fail(errText(r2));return}
 var key=r2.body.key;
 if(!key||String(key).indexOf('ucast_live_')!==0){fail(L.generic);return}
 lead.textContent=L.desktopSending;
+if(post){var f=document.createElement('form');f.method='POST';f.action='http://127.0.0.1:'+p+'/';
+[['key',key],['state',state]].forEach(function(kv){var i=document.createElement('input');i.type='hidden';i.name=kv[0];i.value=kv[1];f.appendChild(i)});
+document.body.appendChild(f);f.submit();return}
 location.replace('http://127.0.0.1:'+p+'/?key='+encodeURIComponent(key)+'&state='+encodeURIComponent(state));
 },function(){fail(L.offline)});
 },function(){fail(L.offline)});
 })();`;
-  return { html: shell(t.desktopTitle, body, script, nonce, links), nonce };
+  return { html: shell(t.desktopTitle, body, script, nonce, links), nonce, formAction: DESKTOP_RETURN_ORIGIN };
 }
 
 export function notFoundAccountPage(links: PageLinks): RenderedPage {
