@@ -1040,11 +1040,11 @@ describe('account page script', () => {
   it.each(['pt', 'en', 'fr'])('is valid JavaScript in %s and carries the coupon card and the admin panel', async (lang) => {
     const gw = await startGateway();
     const signupPage = await call(gw, 'GET', '/signup', { host: SITE, headers: { 'Accept-Language': lang } });
-    for (const source of [...signupPage.text.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map(m => m[1]!).filter(Boolean)) expect(scriptErrors(source)).toEqual([]);
+    for (const source of [...signupPage.text.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/gi)].map(m => m[1]!).filter(Boolean)) expect(scriptErrors(source)).toEqual([]);
     expect(signupPage.text).toContain('id="inv"');
     const page = await call(gw, 'GET', '/account', { host: SITE, headers: { 'Accept-Language': lang } });
     expect(page.status).toBe(200);
-    const scripts = [...page.text.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map(m => m[1]!).filter(Boolean);
+    const scripts = [...page.text.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/gi)].map(m => m[1]!).filter(Boolean);
     expect(scripts.length).toBeGreaterThan(0);
     for (const source of scripts) expect(scriptErrors(source)).toEqual([]);
     for (const id of ['cf', 'cc', 'cb', 'cm', 'cpf', 'cpb', 'cam', 'coupons']) expect(page.text).toContain(`id="${id}"`);
