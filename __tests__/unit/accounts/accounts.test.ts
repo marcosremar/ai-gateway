@@ -10,6 +10,7 @@ import type { AddressInfo } from 'net';
 import { mkdtempSync, readFileSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import ts from 'typescript';
 import { createProxyServer } from '../../../src/gateway/proxy/server';
 import { createEmailSender } from '../../../src/accounts/email';
 import { AppLimits } from '../../../src/gateway/proxy/app-limits';
@@ -1029,16 +1030,23 @@ describe('coupons in the admin panel (session)', () => {
 });
 
 describe('account page script', () => {
+  /** Syntax errors of an inline script, by the TypeScript parser (never `new Function`, which the SAST rules forbid). */
+  const scriptErrors = (source: string): string[] => {
+    const file = ts.createSourceFile('page.js', source, ts.ScriptTarget.ES2022, true, ts.ScriptKind.JS);
+    return (file as unknown as { parseDiagnostics?: Array<{ messageText: string | { messageText: string } }> }).parseDiagnostics
+      ?.map((d) => (typeof d.messageText === 'string' ? d.messageText : d.messageText.messageText)) ?? [];
+  };
+
   it.each(['pt', 'en', 'fr'])('is valid JavaScript in %s and carries the coupon card and the admin panel', async (lang) => {
     const gw = await startGateway();
     const signupPage = await call(gw, 'GET', '/signup', { host: SITE, headers: { 'Accept-Language': lang } });
-    for (const source of [...signupPage.text.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map(m => m[1]!).filter(Boolean)) expect(() => new Function(source)).not.toThrow();
+    for (const source of [...signupPage.text.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map(m => m[1]!).filter(Boolean)) expect(scriptErrors(source)).toEqual([]);
     expect(signupPage.text).toContain('id="inv"');
     const page = await call(gw, 'GET', '/account', { host: SITE, headers: { 'Accept-Language': lang } });
     expect(page.status).toBe(200);
     const scripts = [...page.text.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map(m => m[1]!).filter(Boolean);
     expect(scripts.length).toBeGreaterThan(0);
-    for (const source of scripts) expect(() => new Function(source)).not.toThrow();
+    for (const source of scripts) expect(scriptErrors(source)).toEqual([]);
     for (const id of ['cf', 'cc', 'cb', 'cm', 'cpf', 'cpb', 'cam', 'coupons']) expect(page.text).toContain(`id="${id}"`);
   });
 });
