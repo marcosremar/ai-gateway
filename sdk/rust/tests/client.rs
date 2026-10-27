@@ -100,6 +100,30 @@ async fn chat_request_shape_and_served_headers() {
 }
 
 #[tokio::test]
+async fn no_wake_asks_the_gateway_never_to_start_a_machine() {
+    let mock = Mock::start().await;
+    mock.on("POST", "/v1/chat/completions", vec![Reply::json(200, completion("ok"))]);
+    mock.on(
+        "POST",
+        "/v1/audio/transcriptions",
+        vec![Reply::json(200, json!({"text": "olá"}))],
+    );
+    let gw = client(&mock);
+    // Default: the header is not sent (the call may wake a cold replica).
+    gw.chat(ChatRequest::new("m", vec![])).await.unwrap();
+    assert_eq!(mock.requests()[0].header("x-gateway-no-wake"), None);
+    // Opted out: `1`, and a ready replica is still used (the gateway decides).
+    gw.chat(ChatRequest::new("m", vec![]).no_wake(true)).await.unwrap();
+    assert_eq!(mock.requests()[1].header("x-gateway-no-wake"), Some("1"));
+    // The same option exists on every OpenAI-compatible request.
+    gw.transcribe(TranscribeRequest::new("m", &b"RIFF"[..]).no_wake(true)).await.unwrap();
+    assert_eq!(mock.requests()[2].header("x-gateway-no-wake"), Some("1"));
+    // And `CallOptions` carries it for the admin calls.
+    gw.deployments().with(CallOptions::default().no_wake(true)).get("d").await.unwrap();
+    assert_eq!(mock.requests()[3].header("x-gateway-no-wake"), Some("1"));
+}
+
+#[tokio::test]
 async fn degraded_status_header_is_read() {
     let mock = Mock::start().await;
     mock.on("POST", "/v1/chat/completions", vec![

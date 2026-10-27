@@ -15,9 +15,9 @@
     "reason": "baseline inicial: tamanho de cada entrada no main cc1ff1f (o teto antigo de 512 KB já não valia)"
   },
   "autoscaler": {
-    "raw": 474698,
-    "gzip": 106235,
-    "reason": "baseline inicial: tamanho de cada entrada no main cc1ff1f (o teto antigo de 512 KB já não valia)"
+    "raw": 475069,
+    "gzip": 106285,
+    "reason": "client: microphone advice and the dead/hiss watch in the Node SDK (0ed9c77, d07987f) plus the growing-sentence upload (cbaea4b), 94fe682 never tightened the baseline"
   },
   "benchmarking": {
     "raw": 19954,
@@ -40,9 +40,9 @@
     "reason": "calls: new entry for the gateway-owned LiveKit calls module (#233)"
   },
   "client": {
-    "raw": 140840,
-    "gzip": 34825,
-    "reason": "realtime SDK: uplink rescue over the clip rung, patient WebRTC attempt with retries and late-candidate trickle, audio/red preference, transport by network signal (policy, standby stats, swap)"
+    "raw": 152826,
+    "gzip": 38537,
+    "reason": "client: microphone advice and the dead/hiss watch in the Node SDK (0ed9c77, d07987f) plus the growing-sentence upload (cbaea4b), 94fe682 never tightened the baseline"
   },
   "compute": {
     "raw": 4521,
@@ -50,9 +50,9 @@
     "reason": "baseline inicial: tamanho de cada entrada no main cc1ff1f (o teto antigo de 512 KB já não valia)"
   },
   "gpu-providers": {
-    "raw": 392679,
-    "gzip": 93092,
-    "reason": "baseline inicial: tamanho de cada entrada no main cc1ff1f (o teto antigo de 512 KB já não valia)"
+    "raw": 392946,
+    "gzip": 93121,
+    "reason": "client: microphone advice and the dead/hiss watch in the Node SDK (0ed9c77, d07987f) plus the growing-sentence upload (cbaea4b), 94fe682 never tightened the baseline"
   },
   "handlers": {
     "raw": 225697,
@@ -60,9 +60,9 @@
     "reason": "baseline inicial: tamanho de cada entrada no main cc1ff1f (o teto antigo de 512 KB já não valia)"
   },
   "index": {
-    "raw": 1573738,
-    "gzip": 349257,
-    "reason": "realtime SDK: uplink rescue over the clip rung, patient WebRTC attempt with retries and late-candidate trickle, audio/red preference, transport by network signal (policy, standby stats, swap)"
+    "raw": 1593212,
+    "gzip": 354460,
+    "reason": "client: microphone advice and the dead/hiss watch in the Node SDK (0ed9c77, d07987f) plus the growing-sentence upload (cbaea4b), 94fe682 never tightened the baseline"
   },
   "infra": {
     "raw": 4116,
@@ -85,19 +85,19 @@
     "reason": "baseline inicial: tamanho de cada entrada no main cc1ff1f (o teto antigo de 512 KB já não valia)"
   },
   "providers": {
-    "raw": 190141,
-    "gzip": 40072,
-    "reason": "realtime SDK: uplink rescue over the clip rung, patient WebRTC attempt with retries and late-candidate trickle, audio/red preference, transport by network signal (policy, standby stats, swap)"
+    "raw": 194494,
+    "gzip": 41308,
+    "reason": "client: microphone advice and the dead/hiss watch in the Node SDK (0ed9c77, d07987f) plus the growing-sentence upload (cbaea4b), 94fe682 never tightened the baseline"
   },
   "proxy": {
-    "raw": 188916,
-    "gzip": 49717,
-    "reason": "proxy routing: health/latency reorder of equivalent cloud links (link-reorder.ts)"
+    "raw": 195466,
+    "gzip": 51460,
+    "reason": "client: microphone advice and the dead/hiss watch in the Node SDK (0ed9c77, d07987f) plus the growing-sentence upload (cbaea4b), 94fe682 never tightened the baseline"
   },
   "realtime": {
-    "raw": 112896,
-    "gzip": 28142,
-    "reason": "realtime SDK: uplink rescue over the clip rung, patient WebRTC attempt with retries and late-candidate trickle, audio/red preference, transport by network signal (policy, standby stats, swap)"
+    "raw": 114337,
+    "gzip": 28541,
+    "reason": "client: microphone advice and the dead/hiss watch in the Node SDK (0ed9c77, d07987f) plus the growing-sentence upload (cbaea4b), 94fe682 never tightened the baseline"
   },
   "tracking": {
     "raw": 20369,
@@ -110,9 +110,9 @@
     "reason": "baseline inicial: tamanho de cada entrada no main cc1ff1f (o teto antigo de 512 KB já não valia)"
   },
   "voice": {
-    "raw": 25849,
-    "gzip": 6982,
-    "reason": "realtime SDK: uplink rescue over the clip rung, patient WebRTC attempt with retries and late-candidate trickle, audio/red preference, transport by network signal (policy, standby stats, swap)"
+    "raw": 33536,
+    "gzip": 9385,
+    "reason": "client: microphone advice and the dead/hiss watch in the Node SDK (0ed9c77, d07987f) plus the growing-sentence upload (cbaea4b), 94fe682 never tightened the baseline"
   },
   "workloads": {
     "raw": 36351,

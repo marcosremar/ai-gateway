@@ -319,6 +319,11 @@ impl GatewayClient {
         if let Some(id) = spec.call.request_id.as_deref() {
             rb = rb.header("X-Request-Id", id);
         }
+        // `X-Gateway-No-Wake` (src/gateway/proxy/no-wake.ts): a cold deployment target is skipped with code `cold` and
+        // the route falls through to its cloud fallback — nothing is woken.
+        if spec.call.no_wake {
+            rb = rb.header("X-Gateway-No-Wake", "1");
+        }
         Ok(match &spec.body {
             Body::Empty => rb,
             Body::Json(bytes) => rb.header(reqwest::header::CONTENT_TYPE, "application/json").body(bytes.clone()),

@@ -28,6 +28,9 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 /** GPU commercial types on Scaleway start with the GPU family (L4, L40S, H100, GPU-3070, RENDER…). */
 export const SCALEWAY_GPU_OFF = 'Scaleway desativada (dono, 14/10/2026)';
 export const MAX_GPU_PER_APP = 1;
+/// Longest `description` a spec accepts (`SPEC_FIELDS`/`buildSpec`). A declared deployment whose text is longer can
+/// never be applied: every reconcile fails before the PUT.
+export const MAX_DESCRIPTION_LENGTH = 500;
 /**
  * GPUs an app keeps in its class window (floor and ceiling of its class deployment, and the app's cap there). Off: the
  * owner set one GPU per app on 14/10/2026. A second machine in class for slack against load and host failure is this
@@ -269,7 +272,9 @@ export function parsePartialSpec(input: Record<string, unknown>): ProfileSpec {
     out.autoRetryStuckBoot = input.autoRetryStuckBoot;
   }
   if (input.description !== undefined) {
-    if (typeof input.description !== 'string' || input.description.length > 500) throw new SpecError('description is invalid');
+    if (typeof input.description !== 'string' || input.description.length > MAX_DESCRIPTION_LENGTH) {
+      throw new SpecError(`description is invalid (at most ${MAX_DESCRIPTION_LENGTH} characters)`);
+    }
     out.description = input.description;
   }
   if (input.exposure !== undefined) out.exposure = exposureOf(input.exposure);

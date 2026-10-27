@@ -19,6 +19,7 @@ import type { DeploymentStore } from '../../../src/deployments/types';
 import { placementsOf } from '../../../src/deployments/placements';
 import { vastUnfit } from '../../../src/deployments/placement-walk';
 import { BUILTIN_PROFILES } from '../../../src/deployments/profiles';
+import { buildSpec } from '../../../src/deployments/spec';
 import { vastRefusal } from '../../../src/deployments/spec';
 import { FakeCloud, until } from './_fake-cloud';
 import CALLS_CONFIG from '../../../src/calls/parle.json';
@@ -258,6 +259,20 @@ describe('declarations owned by another registrant', () => {
       const ladder = [d.spec.machineType, ...((d.spec.candidates ?? []) as Array<{ machineType: string }>).map(c => c.machineType)];
       expect(new Set(ladder), d.name).toEqual(new Set(['RTX 3090']));
       expect(d.spec.maxReplicas, d.name).toBe(1);
+    }
+  });
+
+  it('every declaration fits the spec limits, so a reconcile can never fail before the PUT', () => {
+    // 2026-10-27: `babelcast-3090`'s description grew to 528 characters against the 500 that `buildSpec` accepts, so
+    // every reconcile threw `description is invalid` and the GPU was never applied — silently, since only the status
+    // said so. Each declaration's body is built here exactly as the reconciler would send it.
+    const profiles = new Map(BUILTIN_PROFILES.map(p => [p.name, p]));
+    for (const d of DECLARED_DEPLOYMENTS) {
+      const resolved = declaredBody(d, {}, undefined);
+      // `pending` is a normal state (a profile that generates a secret only once it exists): those are covered by the
+      // credential cases below, not by this limit.
+      if ('pending' in resolved) continue;
+      expect(() => buildSpec(d.name, { profile: d.profile, ...resolved.body }, { profiles }), `${d.name}: ${'pending' in resolved}`).not.toThrow();
     }
   });
 
