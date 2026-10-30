@@ -94,7 +94,7 @@ OpenRouter (`OPENROUTER_API_KEY`, mp3, ~$0.62 per million characters). Code: `sr
   same pitch, works on the stream as it arrives); Pocket and Kokoro clips lose their leading/trailing silence like the
   clone already did (`trimClip`, 200 ms kept); and when the listeners are 30 s or more behind (`CONDENSE_AFTER_QUEUED_MS`) a sentence of
   8+ words is shortened for the voice only (`openRouterCondense`, ~⅔ of the words, 2.5 s timeout; the subtitle stays
-  whole, a failure voices the full text). No skipped-line notice: the goal is to not fall behind.
+  whole, a failure voices the full text). The page may queue 10 s of voice instead of 6 (`dubBacklogS` in the room view). No skipped-line notice: the goal is to not fall behind.
   Kokoro only (user decision 2026-10-17: no paid fallback voice — ElevenLabs/MAI-Voice cost 25–30× more): each call
   has `TTS_CALL_TIMEOUT_MS` (15 s; the OpenRouter SDK client has no timeout of its own); a failed or stuck call
   loses that line's voice (its text stays). Kokoro on OpenRouter (DeepInfra, Together) answered in 0.7–2.9 s per

@@ -58,6 +58,8 @@ export interface PublicRoom {
   dubLangs?: string[];
   /** Additive: languages the presenter does not publish that the server translates and voices on demand. */
   listenLangs?: string[];
+  /** Seconds of dubbed voice the page may queue before dropping the oldest clip (`ROOM_DUB_STEADY`); absent = the page's default. */
+  dubBacklogS?: number;
   lines: RoomLine[];
 }
 

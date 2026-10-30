@@ -61,6 +61,7 @@ export interface RoomServiceOptions {
 }
 
 const HOUR_MS = 3_600_000;
+const STEADY_DUB_BACKLOG_S = 10;
 /** lastActivityAt is re-saved at most this often while lines flow (the lines file mtime covers the gap). */
 const META_SAVE_EVERY_MS = 5 * 60_000;
 /** A room with no viewer, untouched for this long, leaves memory (it stays in the store). */
@@ -233,6 +234,7 @@ export class RoomService {
       youtubeUrl: typeof m.youtubeUrl === 'string' ? m.youtubeUrl : null,
       ...(this.dubber ? { dubLangs: [...this.dubLangs(room), ...extra] } : {}),
       ...(extra.length ? { listenLangs: extra } : {}),
+      ...(this.config.serverDubSteady ? { dubBacklogS: STEADY_DUB_BACKLOG_S } : {}),
       lines: room.lines,
     };
   }

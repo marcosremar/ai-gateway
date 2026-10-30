@@ -273,6 +273,13 @@ describe('ROOM_DUB_STEADY: every voice keeps up with the speaker without skippin
     expect(roomsConfigFromEnv({ ROOM_DUB_STEADY: '1' }).serverDubSteady).toBe(true);
   });
 
+  it('lets the page queue 10 s of voice only with the flag', async () => {
+    service = steadyService(true);
+    expect(service.publicView(await room(['fr'])).dubBacklogS).toBe(10);
+    service = steadyService(false);
+    expect(service.publicView(await room(['fr'])).dubBacklogS).toBeUndefined();
+  });
+
   it('trims the silence around a Pocket clip', async () => {
     service = steadyService(true);
     pocket.mockResolvedValue({ audio: withSilence(3), format: 'wav' });
