@@ -402,14 +402,17 @@ export function mp3DurationMs(buf: Buffer): number {
 
 export const TTS_MAX_PARALLEL = 6;
 export const TTS_MAX_WAITING = 4;
+export const TTS_MERGE_AFTER_MS = 8_000;
 
 export const PCM_CHUNK_MIN_BYTES = PCM_BYTES_PER_MS * 250;
 
 export interface TtsStreamOptions {
-  synthesize: (id: number, speed: number, queuedMs: number) => Promise<TtsClip | null>;
+  synthesize: (id: number, speed: number, merged: number[]) => Promise<TtsClip | null>;
   deliver: (id: number, clip: TtsClip, streamed: boolean) => boolean;
   deliverChunk?: (id: number, pcm: Buffer, seq: number) => boolean;
   dropped: (id: number) => void;
+  /** Never drops: from `TTS_MERGE_AFTER_MS` of queue (or a full line) the waiting sentences go out as one. */
+  mergesWaiting?: boolean;
   now: () => number;
   /** Calls at once, read before each start (default TTS_MAX_PARALLEL): 1 for a provider that speaks one sentence at a time. */
   maxParallel?: () => number;
@@ -435,7 +438,7 @@ export class TtsStream {
   push(id: number, readyAt: number): void {
     this.waiting.push({ id, readyAt });
     this.waiting.sort((a, b) => a.id - b.id);
-    if (this.waiting.length > TTS_MAX_WAITING) this.opts.dropped(this.waiting.shift()!.id);
+    if (!this.opts.mergesWaiting && this.waiting.length > TTS_MAX_WAITING) this.opts.dropped(this.waiting.shift()!.id);
     this.pump();
   }
 
@@ -456,10 +459,11 @@ export class TtsStream {
         this.timer.unref?.();
         return;
       }
+      const queuedMs = this.playEnd - this.opts.now() + this.jobs.length * this.clipMs;
+      const merged = this.mergeable(queuedMs);
       const job: Job = { id: this.waiting.shift()!.id, parts: [], sent: 0, ended: false, muted: false };
       this.jobs.push(job);
-      const queuedMs = this.playEnd - this.opts.now() + (this.jobs.length - 1) * this.clipMs;
-      void this.opts.synthesize(job.id, catchUpSpeed(queuedMs), queuedMs).catch(() => null).then(async clip => {
+      void this.opts.synthesize(job.id, catchUpSpeed(queuedMs), merged).catch(() => null).then(async clip => {
         job.clip = clip;
         if (clip?.pcm) await this.read(job, clip.pcm);
         job.ended = true;
@@ -467,6 +471,12 @@ export class TtsStream {
         this.pump();
       });
     }
+  }
+
+  private mergeable(queuedMs: number): number[] {
+    if (!this.opts.mergesWaiting || this.waiting.length < 2) return [];
+    if (queuedMs < TTS_MERGE_AFTER_MS && this.waiting.length <= TTS_MAX_WAITING) return [];
+    return this.waiting.splice(0, this.waiting.length - 1).map(w => w.id);
   }
 
   private async read(job: Job, pcm: AsyncIterable<Buffer>): Promise<void> {

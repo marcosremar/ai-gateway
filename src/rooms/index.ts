@@ -19,7 +19,7 @@ import { RoomService } from './service';
 import { FileRoomStore, MemoryRoomStore, type RoomStore } from './store';
 import { createRoomWs } from './ws';
 
-export { RoomDubber, openRouterCondense, openRouterTranslate } from './dub';
+export { RoomDubber, openRouterCondense, openRouterTranslate, spokenText } from './dub';
 export type { RoomCondense, RoomPocket, RoomTranslate, RoomVoiceClone } from './dub';
 export { roomsConfigFromEnv, ROOMS_DEFAULTS } from './config';
 export type { RoomsConfig } from './config';

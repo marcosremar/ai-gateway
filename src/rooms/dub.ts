@@ -24,7 +24,7 @@ import type { LiveRoom } from './service';
 import type { RoomLine } from './types';
 
 export type RoomTranslate = (text: string, from: string | null, to: string) => Promise<string>;
-export type RoomCondense = (text: string, lang: string) => Promise<string>;
+export type RoomCondense = (text: string, lang: string, maxChars: number) => Promise<string>;
 
 export interface ChatLike {
   chat(req: { model: string; messages: { role: 'system' | 'user'; content: string }[]; temperature?: number; timeoutMs?: number; extraBody?: Record<string, unknown> }): Promise<{ content: string }>;
@@ -33,9 +33,9 @@ export interface ChatLike {
 const TRANSLATE_MODEL = 'google/gemini-2.5-flash-lite';
 const TRANSLATE_TIMEOUT_MS = 6_000;
 const CONDENSE_TIMEOUT_MS = 2_500;
-const CONDENSE_MIN_WORDS = 8;
-const CONDENSE_AFTER_QUEUED_MS = 30_000;
-const wordCount = (text: string): number => text.split(/\s+/).filter(Boolean).length;
+const VOICE_CHARS_PER_SECOND = 16.5;
+const SHORTEST_VOICE_SHARE = 0.6;
+const WORTH_SHORTENING_SHARE = 0.9;
 const errorText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 const languageName = (code: string): string => new Intl.DisplayNames(['en'], { type: 'language' }).of(code) ?? code;
 
@@ -53,18 +53,20 @@ export const openRouterTranslate = (provider: ChatLike): RoomTranslate => async 
   return res.content.trim();
 };
 
-export const openRouterCondense = (provider: ChatLike): RoomCondense => async (text, lang) => {
+export const spokenText = (reply: string): string => reply.replace(/\s*\(\d+[^)]*\)\s*$/u, '').replace(/[*"“”«»]/gu, '').trim();
+
+export const openRouterCondense = (provider: ChatLike): RoomCondense => async (text, lang, maxChars) => {
   const res = await provider.chat({
     model: TRANSLATE_MODEL,
     temperature: 0,
     timeoutMs: CONDENSE_TIMEOUT_MS,
     extraBody: { reasoning: { enabled: false } },
     messages: [
-      { role: 'system', content: `Shorten this ${languageName(lang)} sentence to about two thirds of its words for a live voice-over. Keep the meaning, names and numbers, and keep it in ${languageName(lang)}. Reply with the shortened sentence only.` },
+      { role: 'system', content: `This is what a speaker just said, for a live voice-over in ${languageName(lang)}. Say the same thing in ${languageName(lang)} in at most ${maxChars} characters. The listener must get every idea, fact, name and number; the words can change freely, and only filler, repetition and wording may go. Reply with the new text only.` },
       { role: 'user', content: text },
     ],
   });
-  return res.content.trim();
+  return spokenText(res.content);
 };
 
 export type RoomVoiceClone = DeploymentClone;
@@ -87,9 +89,9 @@ export interface RoomDubberOptions {
   deliver: (room: LiveRoom, lineId: number, lang: string, clip: TtsClip, streamed: boolean) => void;
   deliverChunk: (room: LiveRoom, lineId: number, lang: string, pcm: Buffer, seq: number) => void;
   translate?: RoomTranslate;
-  /** Shortens what is voiced (never the subtitle) when the listeners are far behind; only with `steady`. */
+  /** Says a text in fewer characters, keeping its whole meaning (never the subtitle); only with `steady`. */
   condense?: RoomCondense;
-  /** Catch-up for every voice (Pocket and the clone stretched in time), silence trimmed, condensed text when far behind. */
+  /** No line lost: voices fit the speech time, waiting lines merge, every voice catches up, silence trimmed. */
   steady?: boolean;
   addTranslation: (room: LiveRoom, lineId: number, lang: string, text: string) => void;
   /** Wait after a line before voicing it, so the presenter's own clip can arrive first. */
@@ -226,7 +228,8 @@ export class RoomDubber {
       done: [],
       stream: new TtsStream({
         now: this.opts.now,
-        synthesize: (lineId, speed, queuedMs) => this.voice(room, s, lang, ls, lineId, speed, queuedMs),
+        synthesize: (lineId, speed, merged) => this.voice(room, s, lang, ls, lineId, speed, merged),
+        mergesWaiting: this.opts.steady,
         deliver: (lineId, clip, streamed) => {
           // Re-check: the presenter may have voiced it meanwhile, the listeners may be gone.
           if (!this.stillWanted(room, s, lineId, lang)) return false;
@@ -253,19 +256,35 @@ export class RoomDubber {
     return this.rooms.get(room.meta.code) === s && Boolean(this.wanted(room, s, lineId, lang)?.listen);
   }
 
-  private async voice(room: LiveRoom, s: RoomState, lang: string, ls: LangState, lineId: number, speed: number, queuedMs: number): Promise<TtsClip | null> {
+  private async voice(room: LiveRoom, s: RoomState, lang: string, ls: LangState, lineId: number, speed: number, merged: number[]): Promise<TtsClip | null> {
     const want = this.wanted(room, s, lineId, lang);
     if (!want) return null;
-    ls.done.push(lineId);
-    if (ls.done.length > DONE_KEEP) ls.done.shift();
+    ls.done.push(...merged, lineId);
+    if (ls.done.length > DONE_KEEP) ls.done.splice(0, ls.done.length - DONE_KEEP);
     try {
-      const text = want.line.translations[lang]?.trim() || await this.translate(room, want.line, lang);
+      const lines = [...merged.map(id => this.wanted(room, s, id, lang)?.line).filter(line => line !== undefined), want.line];
+      const texts = await Promise.all(lines.map(async line => line.translations[lang]?.trim() || await this.translate(room, line, lang)));
       if (!want.listen) return null;
-      const voiced = this.opts.steady && queuedMs >= CONDENSE_AFTER_QUEUED_MS ? await this.shortened(text, lang) : text;
+      const text = texts.map(speakable).join(' ');
+      const voiced = this.opts.steady ? await this.fitted(text, lines, lang) : texts.at(-1)!;
       return await this.speak(room, s, want.line, speakable(voiced), lang, speed);
     } catch (err) {
       this.opts.log('rooms: server dub failed', { code: room.meta.code, lang, lineId, error: err instanceof Error ? err.message : String(err) });
       return null;
+    }
+  }
+
+  private async fitted(text: string, lines: RoomLine[], lang: string): Promise<string> {
+    const spokenMs = lines.reduce((sum, line) => sum + (line.speechMs ?? 0), 0);
+    const fits = lines.length > 1 ? 0 : spokenMs ? (spokenMs / 1000) * VOICE_CHARS_PER_SECOND : text.length;
+    const maxChars = Math.round(Math.max(fits, text.length * SHORTEST_VOICE_SHARE));
+    if (!this.opts.condense || maxChars >= text.length * WORTH_SHORTENING_SHARE) return text;
+    try {
+      const short = await this.opts.condense(text, lang, maxChars);
+      return short && short.length < text.length ? short : text;
+    } catch (err) {
+      this.opts.log('rooms: shortening the dub failed, full text', { lang, error: errorText(err) });
+      return text;
     }
   }
 
@@ -297,17 +316,6 @@ export class RoomDubber {
 
   private paced(clip: TtsClip, speed: number): TtsClip {
     return this.opts.steady ? stretchClip(clip, speed) : clip;
-  }
-
-  private async shortened(text: string, lang: string): Promise<string> {
-    if (!this.opts.condense || wordCount(text) < CONDENSE_MIN_WORDS) return text;
-    try {
-      const short = await this.opts.condense(text, lang);
-      return short && wordCount(short) < wordCount(text) ? short : text;
-    } catch (err) {
-      this.opts.log('rooms: condensing the dub failed, full text', { lang, error: errorText(err) });
-      return text;
-    }
   }
 
   private async translate(room: LiveRoom, line: RoomLine, lang: string): Promise<string> {
