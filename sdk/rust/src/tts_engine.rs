@@ -74,7 +74,7 @@ mod tests {
     #[test]
     fn the_answer_parses_with_and_without_a_choice() {
         let v: TtsEngineChoice = serde_json::from_str(
-            r#"{"ok":true,"model":"babelcast-tts-pocket","deployment":"babelcast-3090","engine":"pocket","selected":true,
+            r#"{"ok":true,"model":"babelcast-tts-pocket","deployment":"babelcast-gpu","engine":"pocket","selected":true,
                 "replica":{"active":"qwen","switching_to":"pocket"}}"#,
         )
         .unwrap();

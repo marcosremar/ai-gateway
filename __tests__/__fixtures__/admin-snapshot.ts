@@ -62,7 +62,7 @@ export function demoGpuValidation(now: number, state: DemoState = 'warn'): Recor
       trialRefusal: state === 'bad' ? 'janela de aula aberta: a GPU do app é dos alunos' : null,
       types: GPU_CHOICES.map(c => ({ ...c, ...(speech[c.machineType] ?? none) })),
     },
-    'babelcast-3090': {
+    'babelcast-gpu': {
       family: 'babelcast-speech', image: DEMO_IMAGE, gated: false, testCopy: null, trial: null, trialMinutes: 25, trialRefusal: null,
       types: [{ machineType: 'RTX 3090', maxEurPerHour: 0.19, ...ok(2880, 'FR', 1460) }, ...GPU_CHOICES.slice(1).map(c => ({ ...c, ...none }))],
     },
@@ -141,7 +141,7 @@ export function demoChains(state: DemoState): Record<string, Record<string, Chai
     stt: { 'parle-stt': state === 'warn' ? withGroq(stt) : stt },
     chat: {
       'parle-chat': state === 'warn' ? { ...chat, links: [...chat.links, { target: 'openrouter:google/gemini-2.5-flash-lite', state: 'ready' }] } : chat,
-      'babel-chat': chain('babelcast-3090', state === 'ok' ? 'ready' : 'cold', CLOUD['babel-chat']!),
+      'babel-chat': chain('babelcast-gpu', state === 'ok' ? 'ready' : 'cold', CLOUD['babel-chat']!),
     },
     tts: { 'parle-tts': chain('speech-stack', state === 'bad' ? 'circuit_open' : parleGpu, CLOUD['parle-tts']!), 'babel-tts': chain('babel-live', 'ready', CLOUD['babel-tts']!) },
   };
@@ -383,7 +383,7 @@ function warnSnapshot(now: number): AdminSnapshot {
       deployment('parle-bridge-shadow', [], []),
       deployment('speech-stack-test', [], [], { warm: null }),
       deployment('babel-live', [replica('scw-9z8y', 40, 0.79)], [], { app: 'babelcast', lastRequestAt: iso(now, 50) }),
-      deployment('babelcast-3090', [replica('31544017', 180, 0.181, { provider: 'vast', zone: 'Lyon, FR', machineType: 'RTX 3090', ip: null })], [], {
+      deployment('babelcast-gpu', [replica('31544017', 180, 0.181, { provider: 'vast', zone: 'Lyon, FR', machineType: 'RTX 3090', ip: null })], [], {
         app: 'babelcast', lastRequestAt: iso(now, 4), pinned: { idleMinutes: 60, parked: false }, gpuType: gpuType('RTX 3090', null, null, 0.19),
       }, { provider: 'vast', machineType: 'RTX 3090', minReplicas: 1, idleMinutes: 60, maxEurPerHour: 0.19, testFor: 'babelcast-speech' }),
     ],
@@ -404,7 +404,7 @@ function warnSnapshot(now: number): AdminSnapshot {
     keys: [
       key('env-marcos', 'marcos', 'admin', iso(now, 2), { autoWake: true, canStartGpu: true, gpuDailyEur: null }),
       key('env-parle', 'parle', 'client', iso(now, 1), { autoWake: true, canStartGpu: true, gpuDailyEur: null }, 'producao'),
-      key('key-0f3a9c11d2e4', 'parle-dev', 'client', iso(now, 50), { countsAsUse: false, wakeDeployments: ['speech-stack-test', 'babelcast-3090'], gpuDailyEur: 3 }, 'agentes'),
+      key('key-0f3a9c11d2e4', 'parle-dev', 'client', iso(now, 50), { countsAsUse: false, wakeDeployments: ['speech-stack-test', 'babelcast-gpu'], gpuDailyEur: 3 }, 'agentes'),
       key('key-88b0aa31c7f0', 'babelcast', 'client', iso(now, 8), { neverWake: true }, 'legendas-ao-vivo'),
     ],
     apps: [
@@ -454,6 +454,6 @@ const DEMO_CONTAINER_LINES = [
 ];
 
 export function demoContainerLog(name: string, now: number): ContainerLogView {
-  if (name !== 'babelcast-3090') return { reason: 'unsupported', pending: false, log: null };
+  if (name !== 'babelcast-gpu') return { reason: 'unsupported', pending: false, log: null };
   return { reason: null, pending: false, log: { deployment: name, replicaId: '31544017', at: now - 90_000, lines: DEMO_CONTAINER_LINES, error: null } };
 }

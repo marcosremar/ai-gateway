@@ -229,7 +229,7 @@ describe('parked replicas and the caps', () => {
     expect(x.cloud.releaseReasons).toEqual(['parked-too-long']);
   });
 
-  it('a gateway restart does not reset the forgotten-park clock (Vast, babelcast-3090 parked 19/10 still billed 23/10/2026)', async () => {
+  it('a gateway restart does not reset the forgotten-park clock (Vast, babelcast-gpu parked 19/10 still billed 23/10/2026)', async () => {
     const store = new MemoryDeploymentStore();
     const x = await setup({ parkedMaxMs: 6 * 3_600_000, store });
     await x.controller.put('a', { ...PARKING });

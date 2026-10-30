@@ -125,7 +125,7 @@ function stubController(classOpen = { now: false }, withTestCopy = false) {
   const deployments: Record<string, { app: string; warm: null; testFor?: string }> = {
     'parle-speech': { app: 'parle', warm: null }, 'site-gpu': { app: 'site', warm: null },
     'parle-qwen-tts': { app: 'parle', warm: null },
-    'babelcast-tts-clone': { app: 'babelcast', warm: null }, 'babelcast-3090': { app: 'babelcast', warm: null },
+    'babelcast-tts-clone': { app: 'babelcast', warm: null }, 'babelcast-gpu': { app: 'babelcast', warm: null },
     ...(withTestCopy ? { 'parle-speech-test': { app: 'parle', warm: null, testFor: 'parle-speech' } } : {}),
   };
   const calls: string[] = [];
@@ -220,7 +220,7 @@ describe('app users wake the voice-clone GPU (owner, 18/10/2026: "Clonar a voz" 
   it('an activation key wakes only the listed deployment; every other wake and every other action stays refused', async () => {
     const r = await routes();
     expect((await r.call(APP_USER_KEY, 'POST', '/v1/deployments/babelcast-tts-clone/wake')).status).toBe(202);
-    for (const path of ['/v1/deployments/babelcast-3090/wake', '/v1/deployments/parle-speech/wake', '/v1/deployments/babelcast-tts-clone/park', '/v1/deployments/babelcast-tts-clone/start']) {
+    for (const path of ['/v1/deployments/babelcast-gpu/wake', '/v1/deployments/parle-speech/wake', '/v1/deployments/babelcast-tts-clone/park', '/v1/deployments/babelcast-tts-clone/start']) {
       expect((await r.call(APP_USER_KEY, 'POST', path)).status, path).toBe(403);
     }
     expect((await r.call(OTHER, 'POST', '/v1/deployments/babelcast-tts-clone/wake')).status).toBe(403);

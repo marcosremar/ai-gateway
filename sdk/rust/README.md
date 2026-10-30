@@ -103,7 +103,7 @@ Every refusal comes before the handshake as a normal `Status` error with the bat
 let stream = match gw.transcribe_stream(
     TranscribeStreamRequest::new("babelcast-stt").language("pt").prompt(slide_terms).chunk_size(1.0).window(8.0),
 ).await {
-    Ok(s) => s,                                  // s.ready().provider == Some("deployment:babelcast-3090")
+    Ok(s) => s,                                  // s.ready().provider == Some("deployment:babelcast-gpu")
     Err(e) => return batch_fallback(e),          // e.code(): gpu_not_ready (503, Retry-After), no_streaming_backend, …
 };
 let (tx, mut rx) = stream.split();

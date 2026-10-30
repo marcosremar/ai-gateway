@@ -57,6 +57,10 @@ import { requestIdOf } from '../gateway/proxy/http-conventions';
 import { outgoingTraceHeaders } from '../telemetry/trace-context';
 import { noteStreamCut, type StreamCut } from '../telemetry/stream-cuts';
 
+const FORMER_NAMES: Record<string, string> = { 'babelcast-3090': 'babelcast-gpu' };
+
+const currentDeploymentName = (name: string): string => FORMER_NAMES[name] ?? name;
+
 const MAX_INVOKE_BODY = 100 * 1024 * 1024;
 /** Specs may carry a boot script and its files (up to 8 MB of base64). */
 const MAX_ADMIN_BODY = 16 * 1024 * 1024;
@@ -586,7 +590,8 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
   async function route(req: IncomingMessage, res: ServerResponse, path: string, method: string): Promise<void> {
     const query = (req.url ?? '').includes('?') ? (req.url ?? '').slice((req.url ?? '').indexOf('?')) : '';
     const parts = path.split('/').filter(Boolean); // ['v1', 'deployments' | 'profiles', name?, action?, ...]
-    const [, kind, name, action] = parts;
+    const [, kind, given, action] = parts;
+    const name = kind === 'deployments' && given ? currentDeploymentName(given) : given;
     const admin = () => {
       if (!isAdmin(req)) throw new DeploymentError(403, 'this API key cannot manage deployments');
     };
@@ -747,8 +752,9 @@ export function createDeploymentRoutes(opts: DeploymentRoutesOptions) {
     const path = url.split('?')[0];
     const query = url.includes('?') ? url.slice(url.indexOf('?')) : '';
     const parts = path.split('/').filter(Boolean); // ['v1', 'deployments', name?, action?, ...]
-    const [, kind, name, action] = parts;
-    if (kind !== 'deployments' || !name || action !== 'invoke') return false;
+    const [, kind, given, action] = parts;
+    if (kind !== 'deployments' || !given || action !== 'invoke') return false;
+    const name = currentDeploymentName(given);
     const rest = parts.slice(4).join('/') + (path.endsWith('/') && parts.length > 4 ? '/' : '');
     try {
       return await upgradeInvoke(req, socket, head, name, rest, query);

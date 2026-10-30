@@ -13,7 +13,7 @@ const BABEL_KEY = 'gw_babel_0123456789abcdef0123';
 const LEAKED = 'scw-secret-value-9f8e7d6c5b4a';
 const opts = { now: NOW, csrf: 'c', actor: 'marcos', message: null, app: null };
 const view = (over: Partial<ContainerLogView> = {}, lines = ['INFO: ready']): ContainerLogView => ({
-  reason: null, pending: false, log: { deployment: 'babelcast-3090', replicaId: '31544017', at: NOW - 60_000, lines, error: null }, ...over,
+  reason: null, pending: false, log: { deployment: 'babelcast-gpu', replicaId: '31544017', at: NOW - 60_000, lines, error: null }, ...over,
 });
 const detail = (name: string, c: ContainerLogView | null) => renderGpuDetail('n', demoSnapshot(NOW), name, opts, c)!;
 
@@ -48,7 +48,7 @@ async function panel() {
 
 describe('«Log do contêiner» on the GPU detail page', () => {
   it('shows the lines under their replica and read time, next to the gateway extract', () => {
-    const html = detail('babelcast-3090', view({}, ['INFO: ready', 'Loading model <b>']));
+    const html = detail('babelcast-gpu', view({}, ['INFO: ready', 'Loading model <b>']));
     expect(html).toContain('<h2>Log do contêiner</h2>');
     expect(html).toContain('réplica 31544017 · lido às 11:59 · nova leitura após 12:04');
     expect(html).toContain('<pre class="log">INFO: ready\nLoading model &#60;b&#62;</pre>');
@@ -57,41 +57,41 @@ describe('«Log do contêiner» on the GPU detail page', () => {
   });
 
   it('says why when there is nothing to show', () => {
-    expect(detail('babelcast-3090', view({ pending: true, log: null }))).toContain('Pedido à Vast: o log chega em alguns segundos. Recarregue a página.');
-    expect(detail('babelcast-3090', view({ reason: 'no-replica', log: null }))).toContain('Nenhuma réplica na Vast agora: não há contêiner para ler.');
+    expect(detail('babelcast-gpu', view({ pending: true, log: null }))).toContain('Pedido à Vast: o log chega em alguns segundos. Recarregue a página.');
+    expect(detail('babelcast-gpu', view({ reason: 'no-replica', log: null }))).toContain('Nenhuma réplica na Vast agora: não há contêiner para ler.');
     expect(detail('speech-stack', { reason: 'unsupported', pending: false, log: null })).toContain('A Scaleway não entrega o log da máquina pela API');
-    expect(detail('babelcast-3090', null)).toContain('Log do contêiner indisponível agora.');
-    expect(detail('babelcast-3090', view({}, []))).toContain('O contêiner ainda não escreveu nada.');
+    expect(detail('babelcast-gpu', null)).toContain('Log do contêiner indisponível agora.');
+    expect(detail('babelcast-gpu', view({}, []))).toContain('O contêiner ainda não escreveu nada.');
   });
 
   it('marks a failed read, a refresh in progress and a replica already released', () => {
     const failed = view();
     failed.log = { ...failed.log!, lines: [], error: 'vast PUT /instances/request_logs/31544017/: HTTP 429' };
-    expect(detail('babelcast-3090', failed)).toMatch(/Falhou ao buscar na Vast<\/span> vast PUT \/instances\/request_logs\/31544017\/: HTTP 429 · nova busca ao abrir a página após 12:04/);
-    expect(detail('babelcast-3090', view({ pending: true }))).toContain('lido às 11:59 · atualizando');
-    expect(detail('babelcast-3090', view({ reason: 'no-replica' }))).toContain('réplica 31544017 (já liberada)');
+    expect(detail('babelcast-gpu', failed)).toMatch(/Falhou ao buscar na Vast<\/span> vast PUT \/instances\/request_logs\/31544017\/: HTTP 429 · nova busca ao abrir a página após 12:04/);
+    expect(detail('babelcast-gpu', view({ pending: true }))).toContain('lido às 11:59 · atualizando');
+    expect(detail('babelcast-gpu', view({ reason: 'no-replica' }))).toContain('réplica 31544017 (já liberada)');
   });
 
   it('asks the hook only for a GPU the session may open, and redacts what it returns', async () => {
     const p = await panel();
     const admin = await p.signIn(ADMIN_KEY);
-    const html = await (await p.get('/admin/gpus/babelcast-3090', admin)).text();
+    const html = await (await p.get('/admin/gpus/babelcast-gpu', admin)).text();
     expect(html).toContain('INFO: ready');
     expect(html).toContain('token [segredo]');
     expect(html).not.toContain(LEAKED);
-    expect(p.asked).toEqual(['babelcast-3090']);
+    expect(p.asked).toEqual(['babelcast-gpu']);
     const parle = await p.signIn(PARLE_KEY);
-    expect((await p.get('/admin/gpus/babelcast-3090', parle)).status).toBe(404);
-    expect(p.asked).toEqual(['babelcast-3090']);
+    expect((await p.get('/admin/gpus/babelcast-gpu', parle)).status).toBe(404);
+    expect(p.asked).toEqual(['babelcast-gpu']);
     const babel = await p.signIn(BABEL_KEY);
-    expect((await p.get('/admin/gpus/babelcast-3090', babel)).status).toBe(200);
-    expect(p.asked).toEqual(['babelcast-3090', 'babelcast-3090']);
-    expect((await p.get('/admin/gpus/babelcast-3090', '')).status).toBe(200);
+    expect((await p.get('/admin/gpus/babelcast-gpu', babel)).status).toBe(200);
+    expect(p.asked).toEqual(['babelcast-gpu', 'babelcast-gpu']);
+    expect((await p.get('/admin/gpus/babelcast-gpu', '')).status).toBe(200);
     expect(p.asked).toHaveLength(2);
   });
 
   it('the demo shows fake lines for the Vast GPU and the Scaleway reason elsewhere', () => {
-    expect(detail('babelcast-3090', demoContainerLog('babelcast-3090', NOW))).toContain('Uvicorn running on http://127.0.0.1:8010');
+    expect(detail('babelcast-gpu', demoContainerLog('babelcast-gpu', NOW))).toContain('Uvicorn running on http://127.0.0.1:8010');
     expect(detail('speech-stack', demoContainerLog('speech-stack', NOW))).toContain('A Scaleway não entrega o log da máquina pela API');
   });
 });

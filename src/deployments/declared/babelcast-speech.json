@@ -1,7 +1,7 @@
 {
   "name": "babelcast-speech",
   "app": "babelcast",
-  "description": "babelcast: registered by its owner on an RTX 5090; declared here the owning app (its own keys got 403 on realtime sessions with no app) and paused since 14/10/2026: one GPU per app, an RTX 3090 (owner), and babelcast's GPU is babelcast-3090; its route falls through to the next link. The reconciler sets the app when it is empty (never over another one)",
+  "description": "babelcast: registered by its owner on an RTX 5090; declared here the owning app (its own keys got 403 on realtime sessions with no app) and paused since 14/10/2026: one GPU per app, an RTX 3090 (owner), and babelcast's GPU is babelcast-gpu; its route falls through to the next link. The reconciler sets the app when it is empty (never over another one)",
   "spec": {
     "paused": true
   }
