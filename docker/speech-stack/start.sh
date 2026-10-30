@@ -27,6 +27,9 @@ export BASE_LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-} BASE_PYTHON=$(command -v python
 export TTS_ENGINE=${TTS_ENGINE:-qwen}
 CU12=$(/opt/wenv/bin/python -c 'import nvidia.cublas.lib as a, nvidia.cudnn.lib as b, nvidia.cuda_runtime.lib as c; print(":".join(list(m.__path__)[0] for m in (a, b, c)))')
 TOTAL_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | head -1)
+if [ "$TOTAL_MB" -lt 16000 ]; then
+  export STT_COMPUTE=${STT_COMPUTE:-int8_float16} STT_BATCH=${STT_BATCH:-2}
+fi
 TTS_UTIL=$(python3 -c "print(round(min(0.35, max(0.1, ${TTS_STAGE0_MB:-7400} / $TOTAL_MB)), 3))")
 LLM_PARALLEL=${LLM_PARALLEL:-8}
 LLM_SLOT_CTX=${LLM_SLOT_CTX:-2048}
@@ -55,6 +58,12 @@ if [ "$TTS_ENGINE" = qwen ]; then
   log "tts up, gpu used $(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1) MiB"
 else
   log "tts engine at boot: ${TTS_ENGINE} (vLLM-Omni not started; the orchestrator loads the engine)"
+fi
+
+if [ "${LLM_ENGINE:-llama}" = off ]; then
+  log "llm off (LLM_ENGINE=off): llama.cpp not started"
+  wait "$ORCHESTRATOR"
+  exit $?
 fi
 
 LLAMA_LIBS=/opt/llama:/opt/llama-cu12

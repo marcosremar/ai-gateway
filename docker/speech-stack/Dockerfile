@@ -10,6 +10,12 @@ FROM ghcr.io/marcosremar/aigw-edge:${EDGE_TAG}@${EDGE_DIGEST} AS edge
 
 FROM vllm/vllm-omni:v0.28.0@sha256:6f8be103eaf0055448cf7578cfd621405fd669079d4361bd58896326b2bf722a
 ENV DEBIAN_FRONTEND=noninteractive
+RUN F=/usr/local/lib/python3.12/dist-packages/vllm_omni/model_executor/models/qwen3_tts \
+ && python3 -c "import pathlib, sys; f = pathlib.Path(sys.argv[1]); s = f.read_text(); a = '        self._embedding_dtype = torch.bfloat16\n'; \
+      assert s.count(a) == 1; f.write_text(s.replace(a, '        self._embedding_dtype = ' + sys.argv[2] + '\n'))" "$F/prompt_embeds_builder.py" tts_pad_embed.dtype \
+ && python3 -c "import pathlib, sys; f = pathlib.Path(sys.argv[1]); s = f.read_text(); a = '        self._embedding_dtype = torch.bfloat16\n'; \
+      assert s.count(a) == 1; f.write_text(s.replace(a, '        self._embedding_dtype = ' + sys.argv[2] + '\n'))" "$F/qwen3_tts_talker.py" model_dtype \
+ && grep -n "_embedding_dtype = " "$F/prompt_embeds_builder.py" "$F/qwen3_tts_talker.py"
 # nginx + openssl + curl: the replica front the gateway's boot script writes (src/deployments/cloud-init.ts) — it installs
 # them with apt-get only when missing, which cost every Vast boot an apt update + install before the health loop.
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg curl libgomp1 espeak-ng nginx openssl \
@@ -26,7 +32,7 @@ RUN cd /opt/llama-cu12 && ln -s libcudart.so.12.8.90 libcudart.so.12 && ln -s li
 # wheel for 3.12 and needs Rust to build (both 2026-10-04 builds failed there): pin the pair that resolves to wheels.
 RUN uv venv --python 3.12 /opt/wenv && uv pip install --python /opt/wenv/bin/python --no-cache --only-binary :all: \
     'faster-whisper==1.2.1' 'tokenizers>=0.21' 'huggingface_hub[hf_xet]<1' fastapi 'uvicorn[standard]' python-multipart httpx \
-    numpy nvidia-cublas-cu12 'nvidia-cudnn-cu12==9.*' nvidia-cuda-runtime-cu12 'kokoro-onnx==0.6.1'
+    numpy nvidia-cublas-cu12 'nvidia-cudnn-cu12==9.*' nvidia-cuda-runtime-cu12 'kokoro-onnx==0.6.1' 'sentencepiece==0.2.1'
 
 ARG LLM_REPO=unsloth/Qwen3.5-9B-GGUF
 ARG LLM_FILE=Qwen3.5-9B-Q4_K_M.gguf
@@ -83,10 +89,30 @@ RUN PY=$(command -v python3) && "$PY" -c "import torch; print('base torch', torc
 COPY pocket.py normalize.py /opt/s2s/
 RUN cd /opt/s2s && python3 -X utf8 pocket.py bake "$POCKET_BAKE" && rm -rf /models/hf/xet
 
+ARG MT_REVISIONS="en-itc=1159ef376d48fd8d4a11b88917e7a8a1022beb6f roa-en=4d4757865ab116b39daa3b4ca3cfe1e7daf43cbe itc-multi=4bcdcc2580bef62cae46ec574655c22219f3aaf3 gem-multi=d67b7e7ee532ad4791ffec5692651f87770a6ebe"
+COPY mt.py /opt/s2s/
+RUN CT2=$(/opt/wenv/bin/python -c 'import ctranslate2; print(ctranslate2.__version__)') \
+ && uv venv --python 3.12 /tmp/ct2conv && uv pip install --python /tmp/ct2conv/bin/python --no-cache \
+      --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple \
+      "ctranslate2==$CT2" 'torch==2.5.1' 'transformers>=4.56,<5' 'sentencepiece==0.2.1' 'huggingface_hub<1' sacremoses \
+ && for pair in $MT_REVISIONS; do name=${pair%%=*}; rev=${pair#*=}; \
+      repo=$(cd /opt/s2s && /opt/wenv/bin/python -c "import sys; from mt import MODELS; print(MODELS[sys.argv[1]])" "$name") \
+      && /tmp/ct2conv/bin/hf download "$repo" --revision "$rev" --include '*.json' '*.spm' 'model.safetensors' --local-dir "/tmp/hf-$name" \
+      && /tmp/ct2conv/bin/ct2-transformers-converter --model "/tmp/hf-$name" --output_dir "/models/mt/$name" --quantization float16 \
+           --copy_files source.spm target.spm \
+      && rm -rf "/tmp/hf-$name" || exit 1; done \
+ && rm -rf /tmp/ct2conv /root/.cache \
+ && cd /opt/s2s && /opt/wenv/bin/python -c "from pathlib import Path; from mt import Translator; \
+      t = Translator(Path('/models/mt'), ['en-itc', 'roa-en', 'itc-multi', 'gem-multi'], gpu_compute=''); \
+      r = [t.translate(*x) for x in [('Bom dia a todos.', 'pt', 'en'), ('Good morning, everyone.', 'en', 'fr'), \
+      ('Bonjour à tous.', 'fr', 'pt'), ('Goedemorgen allemaal.', 'nl', 'de')]]; print(r); \
+      assert all(x['text'] and x['device'] == 'cpu' for x in r)" \
+ && du -sh /models/mt/*
+
 COPY --from=edge /app /opt/aigw-edge
 RUN uv venv --python 3.12 /opt/aigw-edge/venv && uv pip install --python /opt/aigw-edge/venv/bin/python --no-cache \
     --only-binary :all: aiortc==1.15.0 aiohttp==3.14.4 'numpy>=1.26,<3'
-COPY start.sh server.py stt_batch.py stt_stream.py tts_engines.py pocket_server.py pocket.py normalize.py qwen3_tts.yaml /opt/s2s/
+COPY start.sh server.py mt.py stt_batch.py stt_stream.py tts_engines.py pocket_server.py pocket.py normalize.py qwen3_tts.yaml /opt/s2s/
 RUN cd /opt/aigw-edge && venv/bin/python -c 'import aigw_edge.server' && ls -l /opt/aigw-edge /opt/aigw-edge/aigw_edge \
  && grep -n repetition_penalty /opt/s2s/qwen3_tts.yaml && sha256sum /opt/s2s/*
 EXPOSE 8000
