@@ -284,9 +284,24 @@ describe('ROOM_DUB_STEADY: every voice keeps up with the speaker without skippin
     expect(durations(fr)).toEqual([3400]);
   });
 
-  it('far behind: Pocket is sped up and only the voice is shortened, the subtitle stays whole', async () => {
+  it('behind but under 30 s of queue: Pocket is sped up and the sentence stays whole', async () => {
     service = steadyService(true);
     pocket.mockResolvedValue({ audio: loud(10), format: 'wav' });
+    const r = await room(['fr']);
+    const fr = viewer('fr');
+    service.addViewer(r, fr);
+    await service.publishLine(r, line(1));
+    await vi.advanceTimersByTimeAsync(0);
+    await service.publishLine(r, line(2, { fr: long }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(condense).not.toHaveBeenCalled();
+    expect(pocket.mock.calls.map(c => c[0])).toEqual(['bonjour 1.', `${long}.`]);
+    expect(durations(fr)[1]).toBeLessThan(8_000);
+  });
+
+  it('30 s or more behind: only the voice is shortened, the subtitle stays whole', async () => {
+    service = steadyService(true);
+    pocket.mockResolvedValue({ audio: loud(31), format: 'wav' });
     const r = await room(['fr']);
     const fr = viewer('fr');
     service.addViewer(r, fr);
@@ -298,14 +313,14 @@ describe('ROOM_DUB_STEADY: every voice keeps up with the speaker without skippin
     expect(condense).toHaveBeenCalledWith(long, 'fr');
     expect(pocket.mock.calls.map(c => c[0])).toEqual(['bonjour 1.', 'chiffres du trimestre et croissance.']);
     const [first, second] = durations(fr);
-    expect(first).toBe(10_000);
-    expect(second).toBeLessThan(8_000);
+    expect(first).toBe(31_000);
+    expect(second).toBeLessThan(25_000);
     expect(r.lines.find(l => l.id === 2)?.translations.fr).toBe(long);
   });
 
   it('a short line is never shortened, and a failed shortening voices the full text', async () => {
     service = steadyService(true);
-    pocket.mockResolvedValue({ audio: loud(10), format: 'wav' });
+    pocket.mockResolvedValue({ audio: loud(31), format: 'wav' });
     const r = await room(['fr']);
     const fr = viewer('fr');
     service.addViewer(r, fr);

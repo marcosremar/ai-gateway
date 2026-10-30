@@ -34,6 +34,7 @@ const TRANSLATE_MODEL = 'google/gemini-2.5-flash-lite';
 const TRANSLATE_TIMEOUT_MS = 6_000;
 const CONDENSE_TIMEOUT_MS = 2_500;
 const CONDENSE_MIN_WORDS = 8;
+const CONDENSE_AFTER_QUEUED_MS = 30_000;
 const wordCount = (text: string): number => text.split(/\s+/).filter(Boolean).length;
 const errorText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 const languageName = (code: string): string => new Intl.DisplayNames(['en'], { type: 'language' }).of(code) ?? code;
@@ -225,7 +226,7 @@ export class RoomDubber {
       done: [],
       stream: new TtsStream({
         now: this.opts.now,
-        synthesize: (lineId, speed) => this.voice(room, s, lang, ls, lineId, speed),
+        synthesize: (lineId, speed, queuedMs) => this.voice(room, s, lang, ls, lineId, speed, queuedMs),
         deliver: (lineId, clip, streamed) => {
           // Re-check: the presenter may have voiced it meanwhile, the listeners may be gone.
           if (!this.stillWanted(room, s, lineId, lang)) return false;
@@ -252,7 +253,7 @@ export class RoomDubber {
     return this.rooms.get(room.meta.code) === s && Boolean(this.wanted(room, s, lineId, lang)?.listen);
   }
 
-  private async voice(room: LiveRoom, s: RoomState, lang: string, ls: LangState, lineId: number, speed: number): Promise<TtsClip | null> {
+  private async voice(room: LiveRoom, s: RoomState, lang: string, ls: LangState, lineId: number, speed: number, queuedMs: number): Promise<TtsClip | null> {
     const want = this.wanted(room, s, lineId, lang);
     if (!want) return null;
     ls.done.push(lineId);
@@ -260,7 +261,7 @@ export class RoomDubber {
     try {
       const text = want.line.translations[lang]?.trim() || await this.translate(room, want.line, lang);
       if (!want.listen) return null;
-      const voiced = this.opts.steady && speed >= TTS_MAX_SPEED ? await this.shortened(text, lang) : text;
+      const voiced = this.opts.steady && queuedMs >= CONDENSE_AFTER_QUEUED_MS ? await this.shortened(text, lang) : text;
       return await this.speak(room, s, want.line, speakable(voiced), lang, speed);
     } catch (err) {
       this.opts.log('rooms: server dub failed', { code: room.meta.code, lang, lineId, error: err instanceof Error ? err.message : String(err) });

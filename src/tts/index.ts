@@ -406,7 +406,7 @@ export const TTS_MAX_WAITING = 4;
 export const PCM_CHUNK_MIN_BYTES = PCM_BYTES_PER_MS * 250;
 
 export interface TtsStreamOptions {
-  synthesize: (id: number, speed: number) => Promise<TtsClip | null>;
+  synthesize: (id: number, speed: number, queuedMs: number) => Promise<TtsClip | null>;
   deliver: (id: number, clip: TtsClip, streamed: boolean) => boolean;
   deliverChunk?: (id: number, pcm: Buffer, seq: number) => boolean;
   dropped: (id: number) => void;
@@ -459,7 +459,7 @@ export class TtsStream {
       const job: Job = { id: this.waiting.shift()!.id, parts: [], sent: 0, ended: false, muted: false };
       this.jobs.push(job);
       const queuedMs = this.playEnd - this.opts.now() + (this.jobs.length - 1) * this.clipMs;
-      void this.opts.synthesize(job.id, catchUpSpeed(queuedMs)).catch(() => null).then(async clip => {
+      void this.opts.synthesize(job.id, catchUpSpeed(queuedMs), queuedMs).catch(() => null).then(async clip => {
         job.clip = clip;
         if (clip?.pcm) await this.read(job, clip.pcm);
         job.ended = true;
