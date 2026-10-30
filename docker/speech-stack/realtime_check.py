@@ -3,6 +3,7 @@ import asyncio
 import base64
 import io
 import json
+import os
 import re
 import statistics
 import time
@@ -13,6 +14,8 @@ from pathlib import Path
 import httpx
 import numpy as np
 import websockets
+
+AUTH = {"Authorization": f"Bearer {os.environ['CHECK_TOKEN']}"} if os.environ.get("CHECK_TOKEN") else {}
 
 LANG_NAME = {"pt": "Portuguese", "fr": "French", "en": "English", "es": "Spanish", "de": "German", "it": "Italian"}
 DUB_TARGET = {"pt": "en", "fr": "pt", "en": "fr"}
@@ -73,7 +76,7 @@ def p(values: list[float], q: float) -> float | None:
 async def stream_stt(ws_base: str, pcm: np.ndarray, language: str) -> dict:
     url = f"{ws_base}/ws/audio-stream?language={language}&segments=1"
     finals: list[str] = []
-    async with websockets.connect(url, max_size=None) as ws:
+    async with websockets.connect(url, max_size=None, additional_headers=AUTH) as ws:
         assert json.loads(await ws.recv()).get("type") == "ready"
 
         async def receive():
@@ -147,7 +150,7 @@ async def dub_one(client, base, model, item, heard, started_at) -> dict:
 
 async def simulate(base: str, ws_base: str, model: str, items: list[dict]) -> list[dict]:
     pending: list[asyncio.Task] = []
-    async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0), headers=AUTH) as client:
         for item in items:
             heard = await stream_stt(ws_base, item["pcm"], item["src"])
             speech_end = time.perf_counter() - (heard["final_after_s"] or 0)
@@ -156,7 +159,7 @@ async def simulate(base: str, ws_base: str, model: str, items: list[dict]) -> li
 
 
 async def back_transcribe(base: str, results: list[dict]) -> None:
-    async with httpx.AsyncClient(timeout=120.0) as client:
+    async with httpx.AsyncClient(timeout=120.0, headers=AUTH) as client:
         for r in results:
             if r.get("pcm") is None or not len(r["pcm"]):
                 continue
@@ -246,7 +249,7 @@ def main() -> None:
     asyncio.run(back_transcribe(args.base, results))
     if not args.no_similarity:
         speaker_similarity(results, items)
-    health = httpx.get(f"{args.base}/health", timeout=10).json()
+    health = httpx.get(f"{args.base}/health", timeout=10, headers=AUTH).json()
     summary = summarize(results, items, health)
 
     args.out.mkdir(parents=True, exist_ok=True)

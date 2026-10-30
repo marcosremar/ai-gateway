@@ -337,3 +337,5 @@ engines' processes get the environment `start.sh` had before it added `/opt/wenv
 
 Tests: `test_tts_engines.py` (switch rules, drain, failures), `test_pocket_vendored.py` (the sidecar with a fake model,
 vendored copies identical), `test_kokoro.py` (the speech route refuses another engine with 503).
+
+RTX 3060 12 GB (2026-10-30, 24 clips, boot 4–8 min on a fresh host): 0 errors, STT WER 7.6 %, final 0.9 s, chrF 67.4 in 78 ms, first TTS audio 102 ms, RTF 0.27, dub WER 1.4 %, voice similarity 0.51 vs 0.12, speech end to dub 1.09 s p50 / 1.39 s p90, GPU 10.5 of 12.3 GB. Below 16 GB `start.sh` always uses `int8_float16`: the image's `STT_COMPUTE=float16` filled the card and CTranslate2 reported it as `invalid device ordinal`.
