@@ -107,7 +107,7 @@ RUN CT2=$(/opt/wenv/bin/python -c 'import ctranslate2; print(ctranslate2.__versi
       r = [t.translate(*x) for x in [('Bom dia a todos.', 'pt', 'en'), ('Good morning, everyone.', 'en', 'fr'), \
       ('Bonjour à tous.', 'fr', 'pt'), ('Goedemorgen allemaal.', 'nl', 'de')]]; print(r); \
       assert all(x['text'] and x['device'] == 'cpu' for x in r)" \
- && du -sh /models/mt/*
+ && rm -rf /opt/s2s/__pycache__ && du -sh /models/mt/*
 
 COPY --from=edge /app /opt/aigw-edge
 RUN uv venv --python 3.12 /opt/aigw-edge/venv && uv pip install --python /opt/aigw-edge/venv/bin/python --no-cache \
