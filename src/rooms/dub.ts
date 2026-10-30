@@ -17,13 +17,14 @@
 // Failures are logged, never thrown into the publish path.
 
 import {
-  KOKORO_VOICES, POCKET_LANGUAGE_CODES, QWEN_LANGUAGES, TTS_MAX_PARALLEL, TTS_MAX_SPEED, TtsStream, kokoroVoice, pocketRoomVoice, primaryLanguage as primary, qwenSpeaks,
+  KOKORO_VOICES, POCKET_LANGUAGE_CODES, QWEN_LANGUAGES, TTS_MAX_PARALLEL, TTS_MAX_SPEED, TtsStream, kokoroVoice, pocketRoomVoice, primaryLanguage as primary, qwenSpeaks, stretchClip, trimClip,
   type DeploymentClone, type LanguageTts, type TtsClip, type VoiceRef,
 } from '../tts';
 import type { LiveRoom } from './service';
 import type { RoomLine } from './types';
 
 export type RoomTranslate = (text: string, from: string | null, to: string) => Promise<string>;
+export type RoomCondense = (text: string, lang: string) => Promise<string>;
 
 export interface ChatLike {
   chat(req: { model: string; messages: { role: 'system' | 'user'; content: string }[]; temperature?: number; timeoutMs?: number; extraBody?: Record<string, unknown> }): Promise<{ content: string }>;
@@ -31,6 +32,9 @@ export interface ChatLike {
 
 const TRANSLATE_MODEL = 'google/gemini-2.5-flash-lite';
 const TRANSLATE_TIMEOUT_MS = 6_000;
+const CONDENSE_TIMEOUT_MS = 2_500;
+const CONDENSE_MIN_WORDS = 8;
+const wordCount = (text: string): number => text.split(/\s+/).filter(Boolean).length;
 const errorText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 const languageName = (code: string): string => new Intl.DisplayNames(['en'], { type: 'language' }).of(code) ?? code;
 
@@ -42,6 +46,20 @@ export const openRouterTranslate = (provider: ChatLike): RoomTranslate => async 
     extraBody: { reasoning: { enabled: false } },
     messages: [
       { role: 'system', content: `Translate this live subtitle${from ? ` from ${languageName(from)}` : ''} into ${languageName(to)}. Reply with the translation only.` },
+      { role: 'user', content: text },
+    ],
+  });
+  return res.content.trim();
+};
+
+export const openRouterCondense = (provider: ChatLike): RoomCondense => async (text, lang) => {
+  const res = await provider.chat({
+    model: TRANSLATE_MODEL,
+    temperature: 0,
+    timeoutMs: CONDENSE_TIMEOUT_MS,
+    extraBody: { reasoning: { enabled: false } },
+    messages: [
+      { role: 'system', content: `Shorten this ${languageName(lang)} sentence to about two thirds of its words for a live voice-over. Keep the meaning, names and numbers, and keep it in ${languageName(lang)}. Reply with the shortened sentence only.` },
       { role: 'user', content: text },
     ],
   });
@@ -68,6 +86,10 @@ export interface RoomDubberOptions {
   deliver: (room: LiveRoom, lineId: number, lang: string, clip: TtsClip, streamed: boolean) => void;
   deliverChunk: (room: LiveRoom, lineId: number, lang: string, pcm: Buffer, seq: number) => void;
   translate?: RoomTranslate;
+  /** Shortens what is voiced (never the subtitle) when the listeners are far behind; only with `steady`. */
+  condense?: RoomCondense;
+  /** Catch-up for every voice (Pocket and the clone stretched in time), silence trimmed, condensed text when far behind. */
+  steady?: boolean;
   addTranslation: (room: LiveRoom, lineId: number, lang: string, text: string) => void;
   /** Wait after a line before voicing it, so the presenter's own clip can arrive first. */
   waitMs: number;
@@ -237,7 +259,9 @@ export class RoomDubber {
     if (ls.done.length > DONE_KEEP) ls.done.shift();
     try {
       const text = want.line.translations[lang]?.trim() || await this.translate(room, want.line, lang);
-      return want.listen ? await this.speak(room, s, want.line, speakable(text), lang, speed) : null;
+      if (!want.listen) return null;
+      const voiced = this.opts.steady && speed >= TTS_MAX_SPEED ? await this.shortened(text, lang) : text;
+      return await this.speak(room, s, want.line, speakable(voiced), lang, speed);
     } catch (err) {
       this.opts.log('rooms: server dub failed', { code: room.meta.code, lang, lineId, error: err instanceof Error ? err.message : String(err) });
       return null;
@@ -248,7 +272,7 @@ export class RoomDubber {
     const voice = this.cloning(room) ? s.voices.get(primary(line.originalLang ?? room.meta.originalLang ?? '')) : undefined;
     if (voice) {
       try {
-        return { ...await this.opts.clone!.synthesize(text, lang, voice), engine: 'clone' };
+        return this.paced({ ...await this.opts.clone!.synthesize(text, lang, voice), engine: 'clone' }, speed);
       } catch (err) {
         if (!this.stockSpeaks(lang)) throw err;
         this.opts.log('rooms: voice clone failed, stock voice instead', { code: room.meta.code, lang, lineId: line.id, error: errorText(err) });
@@ -257,13 +281,32 @@ export class RoomDubber {
     if (this.pocketSpeaks(lang)) {
       try {
         // No speed: Pocket has none (see pocketTts) — the speaker's pace and the catch-up apply to Kokoro only.
-        return { ...await this.opts.pocket!.synthesize(text, lang), engine: 'pocket' };
+        return this.paced(this.trimmed({ ...await this.opts.pocket!.synthesize(text, lang), engine: 'pocket' }), speed);
       } catch (err) {
         if (!kokoroVoice(lang)) throw err;
         this.opts.log('rooms: Pocket failed, Kokoro instead', { code: room.meta.code, lang, lineId: line.id, error: errorText(err) });
       }
     }
-    return { ...await this.opts.synthesize(text, lang, pacedSpeed(speed, line)), engine: 'kokoro' };
+    return this.trimmed({ ...await this.opts.synthesize(text, lang, pacedSpeed(speed, line)), engine: 'kokoro' });
+  }
+
+  private trimmed(clip: TtsClip): TtsClip {
+    return this.opts.steady ? trimClip(clip) : clip;
+  }
+
+  private paced(clip: TtsClip, speed: number): TtsClip {
+    return this.opts.steady ? stretchClip(clip, speed) : clip;
+  }
+
+  private async shortened(text: string, lang: string): Promise<string> {
+    if (!this.opts.condense || wordCount(text) < CONDENSE_MIN_WORDS) return text;
+    try {
+      const short = await this.opts.condense(text, lang);
+      return short && wordCount(short) < wordCount(text) ? short : text;
+    } catch (err) {
+      this.opts.log('rooms: condensing the dub failed, full text', { lang, error: errorText(err) });
+      return text;
+    }
   }
 
   private async translate(room: LiveRoom, line: RoomLine, lang: string): Promise<string> {

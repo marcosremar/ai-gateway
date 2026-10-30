@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CircuitBreakerRegistry } from '../../../src/gateway/providers/cloud/circuit-breaker';
 import {
   PCM_CHUNK_MIN_BYTES, QWEN_CLONE_MODEL, TTS_CALL_TIMEOUT_MS, TTS_MAX_SPEED, TtsStream, catchUpSpeed, deploymentClone, kokoroTts, kokoroVoice, mp3DurationMs,
-  pcmOfWavStream, pcmToWav, qwenCloneTts, qwenSpeaks, trimSilence, trimStreamSilence, wavDurationMs, type TtsClip,
+  PcmStretcher, pcmOfWavStream, pcmToWav, qwenCloneTts, qwenSpeaks, stretchPcm, stretchWav, trimSilence, trimStreamSilence, wavDurationMs, type TtsClip,
 } from '../../../src/tts';
 import { DeploymentError } from '../../../src/deployments/controller-state';
 
@@ -245,5 +245,36 @@ describe('gateway TTS module', () => {
     wav.writeUInt32LE(48_000, 28);
     expect(wavDurationMs(wav)).toBe(1000);
     expect(wavDurationMs(Buffer.from('not audio'))).toBe(0);
+  });
+});
+
+describe('time-stretch for the catch-up of voices without a speed (Pocket, the clone)', () => {
+  const RATE = 24_000;
+  const sine = (hz: number, seconds: number) => s16(Array.from({ length: RATE * seconds }, (_, i) => Math.round(8000 * Math.sin((2 * Math.PI * hz * i) / RATE))));
+  const crossingsPerSecond = (pcm: Buffer) => {
+    let count = 0;
+    for (let at = 2; at + 1 < pcm.length; at += 2) if ((pcm.readInt16LE(at - 2) < 0) !== (pcm.readInt16LE(at) < 0)) count++;
+    return count / (pcm.length / 2 / RATE);
+  };
+
+  it('plays the same sound faster: shorter by the speed, same pitch', () => {
+    const input = sine(220, 4);
+    const stretcher = new PcmStretcher(1.25);
+    const out = Buffer.concat([stretcher.push(input), stretcher.end()]);
+    expect(out.length / input.length).toBeCloseTo(1 / 1.25, 1);
+    expect(crossingsPerSecond(out.subarray(4_800, out.length - 4_800))).toBeCloseTo(440, -1);
+  });
+
+  it('gives the same audio whether it arrives at once or in odd-sized pieces', async () => {
+    const input = sine(180, 2);
+    const whole = await collect(stretchPcm(pieces(input, input.length), 1.2));
+    const streamed = await collect(stretchPcm(pieces(input, 3_002), 1.2));
+    expect(streamed).toEqual(whole);
+  });
+
+  it('stretches a mono WAV and leaves anything else untouched', () => {
+    const wav = pcmToWav(sine(220, 2));
+    expect(wavDurationMs(stretchWav(wav, 1.25))).toBeCloseTo(1600, -2);
+    expect(stretchWav(Buffer.from('not audio'), 1.25)).toEqual(Buffer.from('not audio'));
   });
 });

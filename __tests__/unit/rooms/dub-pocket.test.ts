@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRoomStore, RoomService, roomsConfigFromEnv } from '../../../src/rooms';
 import { CircuitBreakerRegistry } from '../../../src/gateway/providers/cloud/circuit-breaker';
 import { POCKET_VOICES } from '../../../src/gateway/providers/cloud/kokoro-stream/route-tts';
-import { pcmToWav, pocketTts, type TtsClip, type VoiceRef } from '../../../src/tts';
+import { pcmToWav, pocketTts, wavDurationMs, type TtsClip, type VoiceRef } from '../../../src/tts';
 import type { LiveRoom, RoomViewer } from '../../../src/rooms/service';
 import type { RoomLine, RoomServerMessage } from '../../../src/rooms/types';
 
@@ -239,5 +239,97 @@ describe('pocketTts', () => {
     const failing = pocketTts(() => [{ providerId: 'pocket', provider: broken as never, model: 'pocket' }], breakers);
     for (let i = 0; i < 4; i++) await expect(failing('Hallo.', 'de')).rejects.toThrow();
     expect(broken.synthesize).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('ROOM_DUB_STEADY: every voice keeps up with the speaker without skipping lines', () => {
+  const RATE = 24_000;
+  const loud = (seconds: number) => {
+    const pcm = Buffer.alloc(RATE * seconds * 2);
+    for (let i = 0; i < RATE * seconds; i++) pcm.writeInt16LE(Math.round(8000 * Math.sin(i / 5)), i * 2);
+    return pcmToWav(pcm, RATE);
+  };
+  const withSilence = (seconds: number) => {
+    const pcm = Buffer.alloc(RATE * (seconds + 2) * 2);
+    for (let i = RATE; i < RATE * (seconds + 1); i++) pcm.writeInt16LE(Math.round(8000 * Math.sin(i / 5)), i * 2);
+    return pcmToWav(pcm, RATE);
+  };
+  const durations = (v: FakeViewer) => audios(v).map(a => Math.round(wavDurationMs(Buffer.from(a.wav, 'base64'))));
+  const long = 'nous allons maintenant parler des chiffres du trimestre et de la croissance';
+  let condense: ReturnType<typeof vi.fn<(text: string, lang: string) => Promise<string>>>;
+
+  function steadyService(steady: boolean): RoomService {
+    service.stop();
+    condense = vi.fn(async () => 'chiffres du trimestre et croissance');
+    return new RoomService({
+      config: { ...roomsConfigFromEnv({ ROOM_DUB_STEADY: steady ? '1' : '' }), dir: null, serverDubWaitMs: WAIT, serverDubPresenterQuietMs: 60_000 },
+      store: new MemoryRoomStore(), sweepIntervalMs: 0, log, synthesize: kokoro,
+      pocket: { synthesize: pocket, available: () => true }, condense,
+    });
+  }
+
+  it('is off unless ROOM_DUB_STEADY is set', () => {
+    expect(roomsConfigFromEnv({}).serverDubSteady).toBe(false);
+    expect(roomsConfigFromEnv({ ROOM_DUB_STEADY: '1' }).serverDubSteady).toBe(true);
+  });
+
+  it('trims the silence around a Pocket clip', async () => {
+    service = steadyService(true);
+    pocket.mockResolvedValue({ audio: withSilence(3), format: 'wav' });
+    const r = await room(['fr']);
+    const fr = viewer('fr');
+    service.addViewer(r, fr);
+    await service.publishLine(r, line(1));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(durations(fr)).toEqual([3400]);
+  });
+
+  it('far behind: Pocket is sped up and only the voice is shortened, the subtitle stays whole', async () => {
+    service = steadyService(true);
+    pocket.mockResolvedValue({ audio: loud(10), format: 'wav' });
+    const r = await room(['fr']);
+    const fr = viewer('fr');
+    service.addViewer(r, fr);
+    await service.publishLine(r, line(1));
+    await vi.advanceTimersByTimeAsync(0);
+    await service.publishLine(r, line(2, { fr: long }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(condense).toHaveBeenCalledTimes(1);
+    expect(condense).toHaveBeenCalledWith(long, 'fr');
+    expect(pocket.mock.calls.map(c => c[0])).toEqual(['bonjour 1.', 'chiffres du trimestre et croissance.']);
+    const [first, second] = durations(fr);
+    expect(first).toBe(10_000);
+    expect(second).toBeLessThan(8_000);
+    expect(r.lines.find(l => l.id === 2)?.translations.fr).toBe(long);
+  });
+
+  it('a short line is never shortened, and a failed shortening voices the full text', async () => {
+    service = steadyService(true);
+    pocket.mockResolvedValue({ audio: loud(10), format: 'wav' });
+    const r = await room(['fr']);
+    const fr = viewer('fr');
+    service.addViewer(r, fr);
+    await service.publishLine(r, line(1));
+    await vi.advanceTimersByTimeAsync(0);
+    await service.publishLine(r, line(2));
+    await vi.advanceTimersByTimeAsync(0);
+    condense.mockRejectedValueOnce(new Error('timeout'));
+    await service.publishLine(r, line(3, { fr: long }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(pocket.mock.calls.map(c => c[0])).toEqual(['bonjour 1.', 'bonjour 2.', `${long}.`]);
+  });
+
+  it('without the flag: same audio as before, nothing shortened', async () => {
+    service = steadyService(false);
+    pocket.mockResolvedValue({ audio: loud(10), format: 'wav' });
+    const r = await room(['fr']);
+    const fr = viewer('fr');
+    service.addViewer(r, fr);
+    await service.publishLine(r, line(1));
+    await vi.advanceTimersByTimeAsync(0);
+    await service.publishLine(r, line(2, { fr: long }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(condense).not.toHaveBeenCalled();
+    expect(durations(fr)).toEqual([10_000, 10_000]);
   });
 });
