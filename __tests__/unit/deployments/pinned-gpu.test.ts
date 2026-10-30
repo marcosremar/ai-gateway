@@ -48,7 +48,7 @@ describe('babelcast-gpu (owner, 13/10/2026): one RTX 3090 on Vast for babelcast 
     const spec = x.controller.specOf(NAME)!;
     expect(spec).toMatchObject({
       provider: 'vast', machineType: 'RTX 3090', minReplicas: 0, maxReplicas: 1, idleMinutes: 60, idleAction: 'stop',
-      testFor: 'babelcast-speech', image: 'ghcr.io/marcosremar/speech-stack:20261011-0200',
+      testFor: 'babelcast-speech', image: decl.image!.default!,
     });
     expect(spec.maxEurPerHour).toBeLessThanOrEqual(0.3);
     expect(placementsOf(spec).map(p => p.provider)).toEqual(['vast']);
