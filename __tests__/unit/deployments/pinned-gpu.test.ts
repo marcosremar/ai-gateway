@@ -11,7 +11,7 @@ import { placementsOf } from '../../../src/deployments/placements';
 import { createOpsAlerts, type OpsAlert } from '../../../src/telemetry/ops-alerts';
 import { FakeCloud, until } from './_fake-cloud';
 
-const NAME = 'babelcast-3090';
+const NAME = 'babelcast-gpu';
 const HOUR = 60 * 60_000;
 const decl = DECLARED_DEPLOYMENTS.find(d => d.name === NAME)!;
 const controllers: DeploymentController[] = [];
@@ -41,7 +41,7 @@ async function setup(log?: (msg: string, data?: Record<string, unknown>) => void
   return { controller, scaleway, vast, clock, reconciler };
 }
 
-describe('babelcast-3090 (owner, 13/10/2026): one RTX 3090 on Vast for babelcast and the agents tests, on demand only (owner, 24/10/2026)', () => {
+describe('babelcast-gpu (owner, 13/10/2026): one RTX 3090 on Vast for babelcast and the agents tests, on demand only (owner, 24/10/2026)', () => {
   it('is declared on Vast only, at most €0.30/h (owner, 15/10/2026), born scaled to zero (minReplicas 0, no warm window), owned by babelcast', async () => {
     const x = await setup();
     expect((await x.reconciler.reconcile())[0].state).toBe('applied');
@@ -144,7 +144,7 @@ describe('babelcast-3090 (owner, 13/10/2026): one RTX 3090 on Vast for babelcast
   });
 });
 
-describe('babelcast-3090 price cap', () => {
+describe('babelcast-gpu price cap', () => {
   const profiles = new Map(BUILTIN_PROFILES.map(p => [p.name, p]));
   const spec = buildSpec(NAME, { profile: 'speech-stack', image: decl.image!.default, ...decl.spec }, { profiles });
 
@@ -169,7 +169,7 @@ describe('babelcast-3090 price cap', () => {
   });
 });
 
-describe('student audio never reaches babelcast-3090', () => {
+describe('student audio never reaches babelcast-gpu', () => {
   const appOf = (d: string) => (d === NAME || d === 'babelcast-speech' ? 'babelcast' : d.startsWith('parle-') ? 'parle' : null);
   const route = (deployment: string) => ({ stt: { 'parle-stt': [{ provider: 'deployment', deployment, model: 'whisper-large-v3-turbo' }] } });
 

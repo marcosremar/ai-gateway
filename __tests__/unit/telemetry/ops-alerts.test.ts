@@ -242,7 +242,7 @@ describe('a provider account refusal (incident 13/10/2026)', () => {
     const opts = { now: t, csrf: 'c', actor: 'marcos', message: null, app: null };
     expect(renderStatus('n', s, opts)).toContain('Provedor recusou a conta (permissão ou chave): não se resolve sozinho');
     expect(renderGpuDetail('n', s, 'speech-stack', opts)).toContain('Provedor recusou a conta');
-    expect(renderGpuDetail('n', s, 'babelcast-3090', opts)).not.toContain('Provedor recusou a conta');
+    expect(renderGpuDetail('n', s, 'babelcast-gpu', opts)).not.toContain('Provedor recusou a conta');
   });
 
   it('a 403 in the janitor sweep, every 5 min for 15 h, is one urgent alert per hour, never a silent log', async () => {

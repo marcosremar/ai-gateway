@@ -48,7 +48,7 @@ export function withBoots(s: AdminSnapshot, now: number, stuck: boolean): AdminS
   ];
   const scwReported = [{ ...readyBoot('fr-par-2/e81b', now, 3 * 60, [['provisioning', 2], ['pulling', 7], ['starting', 1], ['loading', 4]]), pulledBytes: 21e9 }, ...scwPast];
   const changes: Record<string, (d: DeploymentView) => DeploymentView> = {
-    'babelcast-3090': d => ({
+    'babelcast-gpu': d => ({
       ...d, status: 'warming', lastRequestAt: new Date(now - 7 * MIN).toISOString(),
       spec: { ...d.spec, image: 'ghcr.io/marcosremar/speech-stack:20261011-0200', bootTimeoutMinutes: 35 },
       lastPlacement: 'vast RTX 3090 offer 28817342 @ Lyon, FR (US$0.19/h) near FR',
@@ -86,7 +86,7 @@ export function withBoots(s: AdminSnapshot, now: number, stuck: boolean): AdminS
     }),
   };
   const gpuLogs: Record<string, BootLogLine[]> = {
-    'babelcast-3090': [
+    'babelcast-gpu': [
       line(now, 26 * 60, '31480211', 'replica ready bootMs=900000'),
       line(now, 4 * 60, '31511904', 'releasing replica reason=boot-timeout busy=0'),
       line(now, 7, null, 'creating replica provider=vast type=RTX 3090 zone=fr-par-2'),

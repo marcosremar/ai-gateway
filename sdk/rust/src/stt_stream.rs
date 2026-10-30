@@ -1157,12 +1157,12 @@ mod tests {
                 seen_tx.send(header(&head, "authorization").to_string()).unwrap();
                 let accept = accept_key(header(&head, "sec-websocket-key"));
                 sock.write_all(
-                    format!("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\nX-Gateway-Provider: deployment:babelcast-3090\r\n\r\n")
+                    format!("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\nX-Gateway-Provider: deployment:babelcast-gpu\r\n\r\n")
                         .as_bytes(),
                 )
                 .await
                 .unwrap();
-                let ready = br#"{"type":"ready","model":"babelcast-stt","provider":"deployment:babelcast-3090","engine":"large-v3","language":"pt","prompt_chars":0}"#;
+                let ready = br#"{"type":"ready","model":"babelcast-stt","provider":"deployment:babelcast-gpu","engine":"large-v3","language":"pt","prompt_chars":0}"#;
                 let mut out = vec![0x81, 126];
                 out.extend_from_slice(&(ready.len() as u16).to_be_bytes());
                 out.extend_from_slice(ready);
@@ -1202,9 +1202,9 @@ mod tests {
             .transcribe_stream(TranscribeStreamRequest::new("babelcast-stt").language("pt").prompt("Grafana"))
             .await
             .unwrap();
-        assert_eq!(stream.ready().provider.as_deref(), Some("deployment:babelcast-3090"));
+        assert_eq!(stream.ready().provider.as_deref(), Some("deployment:babelcast-gpu"));
         assert_eq!(stream.ready().engine.as_deref(), Some("large-v3"));
-        assert_eq!(stream.served().provider.as_deref(), Some("deployment:babelcast-3090"));
+        assert_eq!(stream.served().provider.as_deref(), Some("deployment:babelcast-gpu"));
         assert_eq!(seen_rx.recv().await.unwrap(), "GET /v1/audio/transcriptions/stream?model=babelcast-stt&language=pt HTTP/1.1");
         assert_eq!(seen_rx.recv().await.unwrap(), "Bearer ucast_live_test");
         assert_eq!(

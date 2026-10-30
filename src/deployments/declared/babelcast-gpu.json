@@ -1,5 +1,5 @@
 {
-  "name": "babelcast-3090",
+  "name": "babelcast-gpu",
   "app": "babelcast",
   "description": "babelcast: one RTX 3090 24 GB on Vast at most €0.30/h (owner, 15/10/2026), the Whisper-only image (large-v3 on an empty card, so Ao vivo streams; the LLM falls through to the cloud), for babelcast and the agents' tests only; on demand only (owner, 24/10/2026): no minimum replica, it is born scaled to zero, a request wakes it and it parks after 60 min with no request. Parked = stopped with its disk (19/10/2026): a wake resumes the same host, no 9-min pull; deleted after 72 h unused. App babelcast: no parle route may name it",
   "profile": "speech-stack",

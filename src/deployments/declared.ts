@@ -28,7 +28,7 @@
  */
 
 import { randomBytes } from 'crypto';
-import babelcast3090 from './declared/babelcast-3090.json';
+import babelcastGpu from './declared/babelcast-gpu.json';
 import babelcastSpeech from './declared/babelcast-speech.json';
 import babelcastTts from './declared/babelcast-tts.json';
 import parleSpeech from './declared/parle-speech.json';
@@ -60,7 +60,7 @@ export interface DeclaredDeployment {
  */
 export const DECLARED_DEPLOYMENTS: DeclaredDeployment[] = [
   parleSpeech, parleSpeechTest,
-  babelcastSpeech, babelcastTts, babelcast3090,
+  babelcastSpeech, babelcastTts, babelcastGpu,
 ] as DeclaredDeployment[];
 
 /** Reconcile period. The boot run happens before the providers are mounted (serve.ts). */

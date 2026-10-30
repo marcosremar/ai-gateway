@@ -166,10 +166,10 @@ describe('admin page (/admin)', () => {
     expect(form).toContain('name="next" value="/admin?app=parle"');
     expect((await gw.login(ADMIN_KEY, '/admin?app=parle#apps')).res.headers.get('location')).toBe('/admin?app=parle#apps');
     expect((await gw.login(ADMIN_KEY, '/admin#gpus')).res.headers.get('location')).toBe('/admin#gpus');
-    for (const next of ['/admin/gpus', '/admin/servicos?app=parle#garantia-parle', '/admin/gpus/babelcast-3090']) {
+    for (const next of ['/admin/gpus', '/admin/servicos?app=parle#garantia-parle', '/admin/gpus/babelcast-gpu']) {
       expect((await gw.login(ADMIN_KEY, next)).res.headers.get('location')).toBe(next);
     }
-    expect(await (await gw.call('/admin/gpus/babelcast-3090')).text()).toContain('name="next" value="/admin/gpus/babelcast-3090"');
+    expect(await (await gw.call('/admin/gpus/babelcast-gpu')).text()).toContain('name="next" value="/admin/gpus/babelcast-gpu"');
     gw.clock.now += 16 * 60_000;
     for (const evil of ['https://evil.example/admin', '//evil.example', '/admin/../v1', '/admin?app=x"><script>', '/admin/outra', '/admin/gpus/../v1']) {
       expect((await gw.login(ADMIN_KEY, evil)).res.headers.get('location')).toBe('/admin');
@@ -268,7 +268,7 @@ describe('admin page (/admin)', () => {
     const { cookie } = await gw.signedIn();
     const html = await (await gw.call('/admin/gpus', { cookie })).text();
     expect(html).toContain('limite: 1 GPU (RTX 3090) por app — dono, 14/10/2026 · ');
-    expect(html).toContain('babelcast: babelcast-3090');
+    expect(html).toContain('babelcast: babelcast-gpu');
   });
 
   it('the GPU type: a select with each type, its €/h and €/class, admin only, with the CSRF token, audited', async () => {
@@ -281,9 +281,9 @@ describe('admin page (/admin)', () => {
     expect(page).toContain('H100 SXM escolhida por marcos');
     expect(page).toContain('trocar agora (reinicia a GPU, ~20 min fria)');
     const list = await (await gw.call('/admin/gpus', { cookie })).text();
-    expect(list).toContain('<a class="btn" href="/admin/gpus/babelcast-3090#tipo">GPU RTX 3090 · trocar</a>');
+    expect(list).toContain('<a class="btn" href="/admin/gpus/babelcast-gpu#tipo">GPU RTX 3090 · trocar</a>');
     expect(list).toContain('<a class="btn" href="/admin/gpus/speech-stack#tipo">GPU H100 SXM · trocar</a>');
-    expect(await (await gw.call('/admin/gpus/babelcast-3090', { cookie })).text())
+    expect(await (await gw.call('/admin/gpus/babelcast-gpu', { cookie })).text())
       .toMatch(/<option value="" selected>RTX 3090 \(padrão\) · até €\s0,19\/h<\/option>/);
     expect((await gw.post('/admin/gpu-type', { name: 'speech-stack', machineType: 'RTX 5090' }, cookie)).status).toBe(403);
     const app = await gw.signedIn(CLIENT_KEY);
@@ -310,7 +310,7 @@ describe('admin page (/admin)', () => {
     expect(page).toContain('stt: heard «» instead of «Bom dia.»');
     expect(page.match(/action="\/admin\/gpu-test"/g)).toHaveLength(4);
     expect(page).toMatch(/≈ €\s1,04 · €\s2,50\/h × 25 min/);
-    const babel = await (await gw.call('/admin/gpus/babelcast-3090', { cookie })).text();
+    const babel = await (await gw.call('/admin/gpus/babelcast-gpu', { cookie })).text();
     expect(babel).toContain('<h2>Tipo de GPU</h2>');
     expect(babel).not.toContain(' disabled>');
     expect(babel).not.toContain('/admin/gpu-test');
@@ -368,7 +368,7 @@ describe('admin page (/admin)', () => {
     const gw = await gateway();
     const { cookie, csrf } = await gw.signedIn();
     const html = await gw.every(cookie);
-    const at = html.indexOf('<b class="mono">babelcast-3090');
+    const at = html.indexOf('<b class="mono">babelcast-gpu');
     const row = html.slice(at, html.indexOf('</tr>', at));
     expect(row).toContain('Vast · produção');
     expect(row).toContain('fixada');
@@ -380,18 +380,18 @@ describe('admin page (/admin)', () => {
     expect(row).toContain('action="/admin/pin"');
     const scw = html.indexOf('<b class="mono">speech-stack');
     expect(html.slice(scw, html.indexOf('</tr>', scw))).toContain('Scaleway · desativada para GPU');
-    expect(html).toMatch(/<code>babelcast-3090<\/code>.*Vast · produção.*fixada/);
+    expect(html).toMatch(/<code>babelcast-gpu<\/code>.*Vast · produção.*fixada/);
 
-    expect((await gw.post('/admin/pin', { name: 'babelcast-3090', on: '0' }, cookie)).status).toBe(403);
-    expect((await gw.post('/admin/pin', { name: 'babelcast-3090', on: '0', csrf }, cookie, { 'Sec-Fetch-Site': 'cross-site' })).status).toBe(403);
-    const res = await gw.post('/admin/pin', { name: 'babelcast-3090', on: '0', csrf }, cookie);
+    expect((await gw.post('/admin/pin', { name: 'babelcast-gpu', on: '0' }, cookie)).status).toBe(403);
+    expect((await gw.post('/admin/pin', { name: 'babelcast-gpu', on: '0', csrf }, cookie, { 'Sec-Fetch-Site': 'cross-site' })).status).toBe(403);
+    const res = await gw.post('/admin/pin', { name: 'babelcast-gpu', on: '0', csrf }, cookie);
     expect(res.status).toBe(303);
     expect(res.headers.get('location')).toMatch(/#gpus$/);
-    expect((await gw.post('/admin/pin', { name: 'babelcast-3090', on: '1', csrf }, cookie)).status).toBe(303);
-    expect(gw.pins).toEqual([['babelcast-3090', false], ['babelcast-3090', true]]);
+    expect((await gw.post('/admin/pin', { name: 'babelcast-gpu', on: '1', csrf }, cookie)).status).toBe(303);
+    expect(gw.pins).toEqual([['babelcast-gpu', false], ['babelcast-gpu', true]]);
     expect(gw.audit.filter(e => String(e.action).includes('pin'))).toEqual([
-      { actor: 'marcos', action: 'admin-page.unpin', names: ['babelcast-3090'], ok: true },
-      { actor: 'marcos', action: 'admin-page.pin', names: ['babelcast-3090'], ok: true },
+      { actor: 'marcos', action: 'admin-page.unpin', names: ['babelcast-gpu'], ok: true },
+      { actor: 'marcos', action: 'admin-page.pin', names: ['babelcast-gpu'], ok: true },
     ]);
   });
 
@@ -399,15 +399,15 @@ describe('admin page (/admin)', () => {
     const gw = await gateway();
     const { cookie } = await gw.signedIn();
     const html = await gw.every(cookie);
-    const at = html.indexOf('<b class="mono">babelcast-3090');
+    const at = html.indexOf('<b class="mono">babelcast-gpu');
     const row = html.slice(at, html.indexOf('</tr>', at));
     expect(row).toContain('Iniciando');
     // «esperado» is the phase's stuck limit (`BootState.expectedMinutes`, the number «Travou em …» is judged against):
     // past pulls of 6 and 7 min → 1.5 × 6.5 = 10, raised to the pull floor `SLOW_PULL_FLOOR_MINUTES` (12 since 19/10/2026).
     expect(row).toContain('puxando a imagem há 3 min · esperado 12 min');
-    expect(row).toContain('href="/admin/gpus/babelcast-3090"');
+    expect(row).toContain('href="/admin/gpus/babelcast-gpu"');
     expect(html).toMatch(/GPUs e máquinas[^]*?2 iniciando/);
-    expect(html).toMatch(/<code>babelcast-3090<\/code>[^]*?Iniciando · puxando a imagem há 3 min/);
+    expect(html).toMatch(/<code>babelcast-gpu<\/code>[^]*?Iniciando · puxando a imagem há 3 min/);
     const failed = html.slice(html.indexOf('<b class="mono">parle-bridge-shadow'));
     expect(failed.slice(0, failed.indexOf('</tr>'))).toContain('sem oferta disponível · nova tentativa às 12:07');
   });
@@ -425,9 +425,9 @@ describe('admin page (/admin)', () => {
 
   it('the detail page shows the boot timeline, the offer, the past boots and the log extract, with secrets redacted', async () => {
     const gw = await gateway();
-    gw.snapshot.gpuLogs!['babelcast-3090']!.push({ at: gw.clock.now, replicaId: '31544017', text: `create failed error=token ${PROVIDER_SECRET}` });
+    gw.snapshot.gpuLogs!['babelcast-gpu']!.push({ at: gw.clock.now, replicaId: '31544017', text: `create failed error=token ${PROVIDER_SECRET}` });
     const { cookie } = await gw.signedIn();
-    const res = await gw.call('/admin/gpus/babelcast-3090', { cookie });
+    const res = await gw.call('/admin/gpus/babelcast-gpu', { cookie });
     expect(res.status).toBe(200);
     const html = await res.text();
     for (const text of ['procurando oferta e alugando', 'máquina ligando no provedor', 'puxando a imagem', '(em curso)', '31544017', 'RTX 3090 · Lyon, FR',
@@ -436,22 +436,22 @@ describe('admin page (/admin)', () => {
     expect(html).not.toMatch(LEAK);
     expect(html).toContain('<a href="/admin/gpus">GPUs e máquinas</a>');
     expect(html).toContain('action="/admin/pin"');
-    expect(html).toContain('name="back" value="/admin/gpus/babelcast-3090"');
+    expect(html).toContain('name="back" value="/admin/gpus/babelcast-gpu"');
     expect(html).toMatch(/href="\/admin\/gpus" class="[a-z]+ cur"/);
     expect((await gw.call('/admin/gpus/no-such-gpu', { cookie })).status).toBe(404);
-    expect(await (await gw.call('/admin/gpus/babelcast-3090')).text()).toContain('name="key"');
+    expect(await (await gw.call('/admin/gpus/babelcast-gpu')).text()).toContain('name="key"');
   });
 
   it('an app session opens only its own GPUs and reads only their logs', async () => {
     const gw = await gateway();
     const { cookie } = await gw.signedIn(CLIENT_KEY);
-    expect((await gw.call('/admin/gpus/babelcast-3090', { cookie })).status).toBe(404);
+    expect((await gw.call('/admin/gpus/babelcast-gpu', { cookie })).status).toBe(404);
     expect((await gw.call('/admin/gpus/parle-bridge-shadow', { cookie })).status).toBe(200);
     const page = await (await gw.call('/admin/gpus/parle-bridge-shadow', { cookie })).text();
     expect(page).toContain('create failed');
     expect(page).not.toContain('31544017');
     const babel = await gw.signedIn(BABEL_KEY);
-    const own = await (await gw.call('/admin/gpus/babelcast-3090', { cookie: babel.cookie })).text();
+    const own = await (await gw.call('/admin/gpus/babelcast-gpu', { cookie: babel.cookie })).text();
     expect(own).toContain('Pulling image');
     expect(own).not.toContain('parle-bridge-shadow');
   });
@@ -461,12 +461,12 @@ describe('admin page (/admin)', () => {
     await gw.access.setPolicy({ id: 'env-babelcast', canStartGpu: true });
     const { cookie, csrf } = await gw.signedIn(BABEL_KEY);
     const html = await gw.every(cookie);
-    expect(html).toContain('babelcast-3090');
+    expect(html).toContain('babelcast-gpu');
     expect(html).not.toContain('/admin/pin');
-    expect(await (await gw.call('/admin/gpus/babelcast-3090', { cookie })).text()).not.toContain('/admin/pin');
-    expect((await gw.post('/admin/pin', { name: 'babelcast-3090', on: '0', csrf }, cookie)).status).toBe(403);
+    expect(await (await gw.call('/admin/gpus/babelcast-gpu', { cookie })).text()).not.toContain('/admin/pin');
+    expect((await gw.post('/admin/pin', { name: 'babelcast-gpu', on: '0', csrf }, cookie)).status).toBe(403);
     expect(gw.pins).toEqual([]);
-    expect(gw.audit.at(-1)).toMatchObject({ action: 'admin-page.pin', names: ['babelcast-3090'], ok: false });
+    expect(gw.audit.at(-1)).toMatchObject({ action: 'admin-page.pin', names: ['babelcast-gpu'], ok: false });
   });
 
   it('hides a recommendation for 7 days only for the admin, with the CSRF token', async () => {
