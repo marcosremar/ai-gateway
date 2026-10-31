@@ -345,7 +345,7 @@ describe('realtime dubbing (steadyDub): every voice keeps up with the speaker wi
     expect(pocket.mock.calls.map(c => c[0])).toEqual([`${long}.`, `${long}.`]);
   });
 
-  it('never loses a line: the lines waiting behind a long clip go out as one', async () => {
+  it('never loses a line: the lines waiting behind a long clip go out together, at most 4 per clip', async () => {
     service = steadyService(true);
     let release: (clip: TtsClip) => void = () => {};
     pocket.mockImplementationOnce(() => new Promise<TtsClip>(resolve => { release = resolve; }));
@@ -357,9 +357,10 @@ describe('realtime dubbing (steadyDub): every voice keeps up with the speaker wi
     await vi.advanceTimersByTimeAsync(0);
     release({ audio: loud(1), format: 'wav' });
     await vi.advanceTimersByTimeAsync(0);
-    expect(condense).toHaveBeenCalledWith('bonjour 2. bonjour 3. bonjour 4. bonjour 5. bonjour 6. bonjour 7.', 'fr', 39);
-    expect(pocket).toHaveBeenCalledTimes(2);
-    expect(audios(fr).map(a => a.lineId)).toEqual([1, 7]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(condense).toHaveBeenCalledWith('bonjour 2. bonjour 3. bonjour 4. bonjour 5.', 'fr', 26);
+    expect(pocket).toHaveBeenCalledTimes(4);
+    expect(audios(fr).map(a => a.lineId)).toEqual([1, 5, 6, 7]);
     expect(log).not.toHaveBeenCalledWith('rooms: server dub dropped stale line', expect.anything());
   });
 

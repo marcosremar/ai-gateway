@@ -403,6 +403,7 @@ export function mp3DurationMs(buf: Buffer): number {
 export const TTS_MAX_PARALLEL = 6;
 export const TTS_MAX_WAITING = 4;
 export const TTS_MERGE_AFTER_MS = 8_000;
+export const TTS_MAX_MERGED = 4;
 
 export const PCM_CHUNK_MIN_BYTES = PCM_BYTES_PER_MS * 250;
 
@@ -476,7 +477,7 @@ export class TtsStream {
   private mergeable(queuedMs: number): number[] {
     if (!this.opts.mergesWaiting?.() || this.waiting.length < 2) return [];
     if (queuedMs < TTS_MERGE_AFTER_MS && this.waiting.length <= TTS_MAX_WAITING) return [];
-    return this.waiting.splice(0, this.waiting.length - 1).map(w => w.id);
+    return this.waiting.splice(0, Math.min(this.waiting.length, TTS_MAX_MERGED) - 1).map(w => w.id);
   }
 
   private async read(job: Job, pcm: AsyncIterable<Buffer>): Promise<void> {

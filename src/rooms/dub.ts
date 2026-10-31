@@ -32,7 +32,7 @@ export interface ChatLike {
 
 const TRANSLATE_MODEL = 'google/gemini-2.5-flash-lite';
 const TRANSLATE_TIMEOUT_MS = 6_000;
-const CONDENSE_TIMEOUT_MS = 2_500;
+const CONDENSE_TIMEOUT_MS = 6_000;
 const VOICE_CHARS_PER_SECOND = 16.5;
 const SHORTEST_VOICE_SHARE = 0.6;
 const WORTH_SHORTENING_SHARE = 0.9;

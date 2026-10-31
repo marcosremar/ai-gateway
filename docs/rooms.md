@@ -93,8 +93,8 @@ OpenRouter (`OPENROUTER_API_KEY`, mp3, ~$0.62 per million characters). Code: `sr
   have no speed, so their audio is time-stretched by the same `catchUpSpeed` (`PcmStretcher`, WSOLA: 40 ms windows,
   same pitch, works on the stream as it arrives); Pocket and Kokoro clips lose their leading/trailing silence like the
   clone already did (`trimClip`, 200 ms kept); and no line is dropped (user decision 2026-10-30: the listener gets all the meaning, not the exact words). What is voiced is rewritten to fit
-  the time the speaker took (`speechMs` at 16.5 chars/s, at least 60 % of the text; `openRouterCondense`, 2.5 s timeout, every idea, fact, name and number kept), from 8 s of queue
-  or 5 lines waiting the waiting lines go out as one (`TTS_MERGE_AFTER_MS`, the clip under the last line), and the page never drops (`dubBacklogS`). The subtitle stays whole; a failed rewrite voices the full text.
+  the time the speaker took (`speechMs` at 16.5 chars/s, at least 60 % of the text; `openRouterCondense`, 6 s timeout, every idea, fact, name and number kept), from 8 s of queue
+  or 5 lines waiting the waiting lines go out together, at most 4 per clip (`TTS_MERGE_AFTER_MS`, `TTS_MAX_MERGED`, the clip under the last line), and the page never drops (`dubBacklogS`). The subtitle stays whole; a failed rewrite voices the full text.
   Kokoro only (user decision 2026-10-17: no paid fallback voice — ElevenLabs/MAI-Voice cost 25–30× more): each call
   has `TTS_CALL_TIMEOUT_MS` (15 s; the OpenRouter SDK client has no timeout of its own); a failed or stuck call
   loses that line's voice (its text stays). Kokoro on OpenRouter (DeepInfra, Together) answered in 0.7–2.9 s per
