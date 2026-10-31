@@ -18,7 +18,7 @@ const GPU = {
   image: 'ghcr.io/me/speech:1', port: 8000, entrypoint: 'bash', args: ['/opt/s2s/start.sh'], provider: 'vast', machineType: 'RTX 3090', maxEurPerHour: 0.3,
   placements: [], idleAction: 'delete',
 };
-const APP: Record<string, string> = { 'parle-speech': 'parle', 'parle-speech-test': 'parle', 'babelcast-3090': 'babelcast', g: 'solo' };
+const APP: Record<string, string> = { 'parle-speech': 'parle', 'parle-speech-test': 'parle', 'babelcast-gpu': 'babelcast', g: 'solo' };
 const wait = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 const controllers: DeploymentController[] = [];
@@ -51,11 +51,11 @@ async function setup(opts: { classGpusPerApp?: Record<string, number> } = {}) {
 
 async function classAndTests() {
   const x = await setup();
-  await x.c.put('babelcast-3090', { ...GPU, minReplicas: 1, maxReplicas: 1 }, { app: 'babelcast' });
+  await x.c.put('babelcast-gpu', { ...GPU, minReplicas: 1, maxReplicas: 1 }, { app: 'babelcast' });
   await x.c.put('parle-speech', { ...GPU, maxReplicas: 2, warmSchedule: [{ ...CLASS_WINDOW, minReplicas: 2 }] }, { app: 'parle' });
   await x.c.put('parle-speech-test', { ...GPU, maxReplicas: 1, testFor: 'parle-speech' }, { app: 'parle' });
   x.c.start();
-  await until(() => x.c.get('babelcast-3090')!.status === 'ready');
+  await until(() => x.c.get('babelcast-gpu')!.status === 'ready');
   await x.c.warm('parle-speech-test', 1, 720);
   await until(() => x.c.get('parle-speech-test')!.status === 'ready');
   return x;
@@ -74,7 +74,7 @@ describe(`${GPU_CAP_RULE}`, () => {
     expect(() => c.wake('parle-speech')).toThrow(/^limite: 1 GPU por app — dono, 14\/10\/2026: app 'parle' already has 1 \(parle-speech-test\)/);
     await expect(c.acquire('parle-speech', { waitMs: 500 })).rejects.toMatchObject({ status: 409, code: 'reserved' });
     await wait(200);
-    expect(vast.created.map(x => x.spec.name).sort()).toEqual(['babelcast-3090', 'parle-speech-test']);
+    expect(vast.created.map(x => x.spec.name).sort()).toEqual(['babelcast-gpu', 'parle-speech-test']);
     expect(Object.fromEntries(most)).toEqual({ babelcast: 1, parle: 1 });
   });
 
@@ -87,7 +87,7 @@ describe(`${GPU_CAP_RULE}`, () => {
     await wait(200);
     expect(c.get('parle-speech')!.replicas).toHaveLength(1);
     expect(c.get('parle-speech')!.autoscale.blockedBy).toMatch(/app 'parle' already has 1 \(parle-speech\)/);
-    expect(c.get('babelcast-3090')!.replicas).toHaveLength(1);
+    expect(c.get('babelcast-gpu')!.replicas).toHaveLength(1);
     await expect(c.warm('parle-speech-test', 1, 30)).rejects.toThrow(/keeps its GPU for 'parle-speech' during the class window/);
     expect(Object.fromEntries(most)).toEqual({ babelcast: 1, parle: 1 });
   });

@@ -60,7 +60,7 @@ Anything else gets `{"type":"error","code":"bad_frame"}` and the stream goes on.
 Gateway → client (text, JSON):
 
 ```json
-{"type":"ready","model":"babelcast-stt","provider":"deployment:babelcast-3090","engine":"large-v3","language":"pt","prompt_chars":312}
+{"type":"ready","model":"babelcast-stt","provider":"deployment:babelcast-gpu","engine":"large-v3","language":"pt","prompt_chars":312}
 {"type":"partial","utterance":0,"text":"Bom dia a todos, vamos","stable":"Bom dia a todos,","end_ms":2100}
 {"type":"final","utterance":0,"text":"Bom dia a todos, vamos começar.","reason":"silence","start_ms":0,"end_ms":3400,
  "audio_ms":3400,"language":"pt","language_probability":0.99,"avg_logprob":-0.21,"no_speech_prob":0.01,

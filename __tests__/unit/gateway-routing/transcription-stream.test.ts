@@ -87,7 +87,7 @@ async function startGateway(replica: FakeReplica, over: Partial<TranscriptionStr
         } as unknown as Lease;
       },
     } as never,
-    deploymentsOf: (model) => ({ 'babelcast-stt': ['babelcast-3090', 'babelcast-speech'], 'babelcast-stt-scribe': [] } as Record<string, string[]>)[model] ?? [],
+    deploymentsOf: (model) => ({ 'babelcast-stt': ['babelcast-gpu', 'babelcast-speech'], 'babelcast-stt-scribe': [] } as Record<string, string[]>)[model] ?? [],
     userOf: (req) => keys[String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, '')] ?? null,
     isAdmin: (userId) => userId === 'admin',
     admit: (userId, model) => (userId === 'babelcast' && model.startsWith('babelcast-')) || userId === 'admin' ? null
@@ -172,8 +172,8 @@ describe('streaming STT route', () => {
     const prompt = 'Kubernetes, Grafana, Ksawery Wiśniewski';
     const c = await connect(`${gw.url}${STT_STREAM_PATH}?model=babelcast-stt&language=pt&chunk_size=0.5&prompt=${encodeURIComponent(prompt)}`);
     await until(() => c.messages.length >= 1);
-    expect(c.messages[0]).toEqual({ type: 'ready', model: 'babelcast-stt', provider: 'deployment:babelcast-3090', engine: 'large-v3', language: 'pt', prompt_chars: prompt.length });
-    expect(gw.acquires[0]).toMatchObject({ name: 'babelcast-3090', opts: { waitMs: 0, stage: 'stt' } });
+    expect(c.messages[0]).toEqual({ type: 'ready', model: 'babelcast-stt', provider: 'deployment:babelcast-gpu', engine: 'large-v3', language: 'pt', prompt_chars: prompt.length });
+    expect(gw.acquires[0]).toMatchObject({ name: 'babelcast-gpu', opts: { waitMs: 0, stage: 'stt' } });
     const upstreamUrl = new URL(replica.urls[0]!, 'http://r');
     expect(upstreamUrl.pathname).toBe('/ws/audio-stream');
     expect(Object.fromEntries(upstreamUrl.searchParams)).toEqual({ segments: '1', language: 'pt', chunk_size: '0.5' });
@@ -206,7 +206,7 @@ describe('streaming STT route', () => {
     expect(gw.leases).toEqual([false]);
     expect(gw.metered.reduce((a, b) => a + b, 0)).toBe(18);
     expect(gw.meterEnds).toBe(1);
-    expect(gw.summaries[0]).toMatchObject({ userId: 'babelcast', model: 'babelcast-stt', deployment: 'babelcast-3090', audioSeconds: 18, finals: 1, from: 'client' });
+    expect(gw.summaries[0]).toMatchObject({ userId: 'babelcast', model: 'babelcast-stt', deployment: 'babelcast-gpu', audioSeconds: 18, finals: 1, from: 'client' });
   });
 
   it('refuses before the handshake with the batch route\'s answers, so the app falls back to batch', async () => {
@@ -218,18 +218,18 @@ describe('streaming STT route', () => {
     const alias = await refused(`${path}?model=whisper-large-v3-turbo`);
     expect(alias.status).toBe(403);
     expect(alias.body.error.message).toMatch(/may only call its own stt aliases/);
-    expect((await refused(`${path}?model=deployment:babelcast-3090`)).status).toBe(403);
+    expect((await refused(`${path}?model=deployment:babelcast-gpu`)).status).toBe(403);
     const none = await refused(`${path}?model=babelcast-stt-scribe`);
     expect(none.status).toBe(404);
     expect(none.body.error).toMatchObject({ code: 'no_streaming_backend' });
     expect(gw.acquires).toHaveLength(0);
 
-    gw.cold.add('babelcast-3090');
+    gw.cold.add('babelcast-gpu');
     const cold = await refused(`${path}?model=babelcast-stt`);
     expect(cold.status).toBe(503);
     expect(cold.retryAfter).toBe('30');
     expect(cold.body.error).toMatchObject({ code: 'gpu_not_ready', type: 'provider_unavailable' });
-    expect(gw.acquires.map(a => a.name)).toEqual(['babelcast-3090', 'babelcast-speech']);
+    expect(gw.acquires.map(a => a.name)).toEqual(['babelcast-gpu', 'babelcast-speech']);
     gw.cold.clear();
 
     replica.mode = 'warming';
@@ -244,9 +244,9 @@ describe('streaming STT route', () => {
     expect(gw.summaries).toHaveLength(0);
 
     replica.mode = 'ready';
-    const admin = await connect(`${path}?model=deployment:babelcast-3090`, 'key-admin');
+    const admin = await connect(`${path}?model=deployment:babelcast-gpu`, 'key-admin');
     await until(() => admin.messages.length >= 1);
-    expect(admin.messages[0]).toMatchObject({ type: 'ready', provider: 'deployment:babelcast-3090' });
+    expect(admin.messages[0]).toMatchObject({ type: 'ready', provider: 'deployment:babelcast-gpu' });
     admin.ws.close();
   });
 

@@ -17,13 +17,13 @@ async function gateway(replica: { status: number; body: unknown }, cold = false)
   const route = createTtsEngineRoute({
     controller: {
       acquire: vi.fn(async () => {
-        if (cold) throw new DeploymentError(503, "deployment 'babelcast-3090': replicas are starting", 30);
+        if (cold) throw new DeploymentError(503, "deployment 'babelcast-gpu': replicas are starting", 30);
         return { machine: { id: 'r1', ip: '10.0.0.9' }, token: 'tok', exposed: false, done } as never;
       }),
     },
     linksOf: (model) => ({
-      'babelcast-tts-pocket': [{ deployment: 'babelcast-3090', upstreamModel: 'pocket' }],
-      'babelcast-tts-kokoro': [{ deployment: 'babelcast-3090', upstreamModel: 'kokoro' }],
+      'babelcast-tts-pocket': [{ deployment: 'babelcast-gpu', upstreamModel: 'pocket' }],
+      'babelcast-tts-kokoro': [{ deployment: 'babelcast-gpu', upstreamModel: 'kokoro' }],
       'babelcast-tts': [{ deployment: 'babelcast-tts-clone', upstreamModel: 'babelcast-tts' }],
     } as Record<string, Array<{ deployment: string; upstreamModel: string }>>)[model] ?? [],
     userOf: (req) => ({ 'Bearer app': 'babelcast', 'Bearer admin': 'ops' } as Record<string, string>)[String(req.headers.authorization)] ?? null,
@@ -51,7 +51,7 @@ describe('TTS engine selection', () => {
     const gw = await gateway({ status: 200, body: { ok: true, ...replica } });
     const r = await gw.post({ model: 'babelcast-tts-pocket' });
     expect(r.status).toBe(200);
-    expect(r.json).toMatchObject({ ok: true, deployment: 'babelcast-3090', engine: 'pocket', selected: true, replica: { switching_to: 'pocket' } });
+    expect(r.json).toMatchObject({ ok: true, deployment: 'babelcast-gpu', engine: 'pocket', selected: true, replica: { switching_to: 'pocket' } });
     expect(gw.calls[0]).toEqual({ url: 'http://10.0.0.9/v1/tts/engine', body: { engine: 'pocket', force: false }, token: 'tok' });
     await gw.post({ model: 'babelcast-tts-kokoro', force: true });
     expect(gw.calls[1]!.body).toEqual({ engine: 'kokoro', force: true });

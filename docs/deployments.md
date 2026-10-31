@@ -69,7 +69,7 @@ body, compares it with the stored spec and calls the same idempotent `controller
 (new image, rotated credential). A deployment that does not exist yet is created from the declaration's `profile`
 when it names one; an existing one is never reset to the profile. Registering never starts a machine: declared specs keep `minReplicas: 0` and the
 reconciler never wakes them — a replica starts on the first request that needs it, as for any deployment. The one
-exception is a declaration with `initial` (`babelcast-3090`): those spec fields are set only when the deployment is
+exception is a declaration with `initial` (`babelcast-gpu`): those spec fields are set only when the deployment is
 created and never put back afterwards, so `initial.minReplicas: 1` pins it once and the operator's pin toggle owns it.
 
 Secrets are mounted from the environment (the dev API) at each reconcile:
@@ -167,7 +167,7 @@ as an unregistered deployment and goes to its `oneGpuDeployment` (docs/api/http.
   keeps two RTX 3090 for the class (slack for load and for a host that dies) and one outside it.
 - **Class first:** while a deployment's `warmSchedule` window is open, another GPU deployment of the same app gets no
   slot, and one it holds is released (`class-priority`). Today that is `parle-speech` over `parle-speech-test`.
-- **Apps are apart:** `parle` and `babelcast` (`babelcast-3090`, pinned) each run one at the same time. The other GPU
+- **Apps are apart:** `parle` and `babelcast` (`babelcast-gpu`, pinned) each run one at the same time. The other GPU
   deployments of an app are paused by their declarations, so they never take the slot on another card:
   `parle-speech-s2s` and `parle-qwen-tts` (Scaleway L4s), `babelcast-speech` and `babelcast-tts` (RTX 5090s, registered
   by babelcast; their route falls through to the next link).
@@ -185,7 +185,7 @@ eu só troco essa máquina RTX 3090 por uma H100 … não precisa mudar nada no 
 - **The menu** (`/admin/gpus` and `/admin/gpus/<name>`, admin only): every type that has both a size profile in
   `envByMachineType` and a price cap in `maxEurPerHourByMachineType`, with its €/h cap and, for a deployment with a
   class window, the €/class (cap × window hours × warm replicas). Today on `parle-speech`, `parle-speech-test` and
-  `babelcast-3090`: RTX 3090 (the declared default; parle ≤ €0.30/h, babelcast ≤ €0.19/h), RTX 4090, RTX 5090, L40S
+  `babelcast-gpu`: RTX 3090 (the declared default; parle ≤ €0.30/h, babelcast ≤ €0.19/h), RTX 4090, RTX 5090, L40S
   (≤ €0.85/h), H100 SXM and H100 PCIE (≤ €2.50/h). Everything else is the same on every card: the image, the voices,
   the routes. Parle stays on EU hosts and on one GPU per app, whatever the type.
 - **Kept across the declared reconcile:** the choice is stored on the deployment (`record.gpuType`, the controller's
@@ -241,9 +241,9 @@ and `parle-speech` is, `parle-tts` goes to `parle-speech` too. To use a separate
 registered, so it would stay the target). Since 14/10/2026 the parle routes name `parle-speech` for `parle-tts`
 directly.
 
-### `babelcast-3090` (the pinned Vast GPU of babelcast and of the agents' tests, 13/10/2026)
+### `babelcast-gpu` (the pinned Vast GPU of babelcast and of the agents' tests, 13/10/2026)
 
-`src/deployments/declared/babelcast-3090.json`, owner decision 13/10/2026: one **RTX 3090 24 GB on Vast**, at most
+`src/deployments/declared/babelcast-gpu.json`, owner decision 13/10/2026: one **RTX 3090 24 GB on Vast**, at most
 US$0.20/h (`maxEurPerHour 0.19` × `EUR_TO_USD 1.05` = US$0.1995), Vast only (`placements: []`, never Scaleway), app
 `babelcast`. It serves **babelcast and the agents' tests only**: the parle class stays on its Scaleway GPUs, and a route
 may not name another app's deployment (`putRoutes` refuses it with 403, admin included), so no parle route can send
@@ -271,11 +271,11 @@ student audio to it.
   `babelcast-llm`). Not its TTS: `babelcast-tts` is Qwen3-TTS **1.7B CustomVoice**, which the image does not carry
   (offline, pre-baked) and which would not fit beside the other two in 24 GB; it stays on `babelcast-tts`, then the cloud.
   The image is CUDA 13 (`minCuda 13`): only 3090 hosts with a driver ≥ 580 qualify, fewer than at CUDA 12.
-- **Test copy.** `testFor: "babelcast-speech"`: a dev key whose `wakeDeployments` lists `babelcast-3090` may start it
+- **Test copy.** `testFor: "babelcast-speech"`: a dev key whose `wakeDeployments` lists `babelcast-gpu` may start it
   (outside a class window, as a start of `startIdleMinutes` under its `gpuDailyEur`), and while it is ready and
   `babelcast-speech` is not, the babelcast aliases are served by it.
-- **babelcast's chain** (the app's own routes; the owner sets them): `babelcast-stt` → `deployment:babelcast-3090` →
-  `deployment:babelcast-speech` → OpenRouter whisper-large-v3-turbo → Groq; `babelcast-llm` → `deployment:babelcast-3090`
+- **babelcast's chain** (the app's own routes; the owner sets them): `babelcast-stt` → `deployment:babelcast-gpu` →
+  `deployment:babelcast-speech` → OpenRouter whisper-large-v3-turbo → Groq; `babelcast-llm` → `deployment:babelcast-gpu`
   → `deployment:babelcast-speech` → OpenRouter gemini-2.5-flash-lite; `babelcast-tts` unchanged.
 - **The speech server in babelcast's TTS chains** (19/10/2026, docs/rooms.md § Own speech server): `babelcast-tts` =
   `deployment:babelcast-tts-clone` → `deployment:babelcast-tts` → `kokoro-stream` → OpenRouter Kokoro (with
@@ -285,14 +285,14 @@ student audio to it.
   `PUT /v1/apps/babelcast/routes` body, once the server runs and its key is set on the gateway.
 - **`babelcast-tts-kokoro`** (14/10/2026): Kokoro-82M on the speech-stack image (CPU, next to Qwen3-TTS; see
   `docker/speech-stack/README.md`), for an app that wants stock voices instead of the cloned ones. Chain:
-  `deployment:babelcast-3090:kokoro` → `deployment:babelcast-speech:kokoro` → `openrouter:hexgrad/kokoro-82m` (the same
+  `deployment:babelcast-gpu:kokoro` → `deployment:babelcast-speech:kokoro` → `openrouter:hexgrad/kokoro-82m` (the same
   model in the cloud, so the voice does not change; nothing else is appended). The app sends
   `{"model": "babelcast-tts-kokoro", "input": …, "voice": "pf_dora", "language": "pt", "response_format": "pcm"|"wav", "stream": true}`
   with a Kokoro voice (pt `pf_dora`/`pm_alex`, en `af_heart`/`am_michael`, fr `ff_siwis`, es `ef_dora`/`em_alex`, it
   `if_sara`/`im_nicola`): the replica and the cloud both speak that voice. The gateway sends a `kokoro` model's voice to the
   replica as is (`isKokoroModel`, no clone lookup). Like babelcast's other aliases it lives in the app's routes: the owner
   adds it to the full `PUT /v1/apps/babelcast/routes` body (a PUT replaces every chain) — **only once the deployments run
-  an image built with Kokoro** (`babelcast-3090` still pins `speech-stack:20261011-0200`, which has none).
+  an image built with Kokoro** (`babelcast-gpu` still pins `speech-stack:20261011-0200`, which has none).
 - **Cost.** At most US$0.20 × 24 h = **US$4.80/day** (€4.56) when used all day; parked after 1 h with no request.
 
 ### `parle-bridge-shadow` (the audio bridge in shadow mode, 12/10/2026) — PARKED
@@ -899,7 +899,7 @@ How the selection uses it (`rankedOffers` in `vast-backend.ts`, `rankOffers` in 
   before** (`images[spec.image]`, no later failure; the fastest measured boot first, in 2-min bands), then one that
   booted another of our images (`bootsOk` > 0), then an unknown one, then the effective price. `placementNote` says
   `booted this image here before in N min`. `inet_down` alone did not predict the pull of the 22.3 GB speech-stack
-  (894 Mbps: 10.4 min; babelcast-3090's hosts: 8.6–9.0 min each time), a host's own past boot does.
+  (894 Mbps: 10.4 min; babelcast-gpu's hosts: 8.6–9.0 min each time), a host's own past boot does.
 - The gate itself is unchanged (`maxRttExcessMs`, `maxRttMs`): reputation only decides which offer is tried first.
 
 A host never measured is still ranked by distance, country and price, and the gate decides after the rental (the
@@ -1107,7 +1107,7 @@ The Scaleway Instance API has no console output, so the boot script itself pushe
   once (release `boot-failed`, the stuck-retry rules). A Vast pull reports nothing (the image is the container), so
   with `imageGb` its limit comes from the rented host's measured `inet_down`: 4× the download it promises, at least
   12 min, never later than the history rule (`pullLimitMinutes`; Poland, 894 Mbps, pulled 22.3 GB in 10.4 min against
-  3.3 promised; the floor was 8 min until 19/10/2026, under the 8.6–9.0 min every babelcast-3090 pull of the same image
+  3.3 promised; the floor was 8 min until 19/10/2026, under the 8.6–9.0 min every babelcast-gpu pull of the same image
   took, so a 2000 Mbps host promising 1.5 min would have been released a minute before its pull ended). Retries per stuck episode: 4 (`STUCK_RETRY_MAX`). The GPU page shows «puxando a imagem 12,3/21 GB · camadas 7/23»
   (the total is the previous ready boot's pulled bytes) and the lines prefixed `replica:`.
 - Off: `BOOT_REPORTING=0` on the gateway (default on, with a public URL). New replicas then get exactly the previous

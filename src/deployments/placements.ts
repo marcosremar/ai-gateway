@@ -184,7 +184,7 @@ export interface RankOffersOptions {
   /**
    * Host machine id → minutes its last fresh boot (rent → ready) of THIS spec's image took. The host's Docker may still
    * hold the layers, and it is the only measured time-to-ready there is: `inet_down` did not predict the pull of the
-   * 22.3 GB speech-stack (Poland, 894 Mbps: 10.4 min; babelcast-3090's hosts: 8.6–9.0 min every time).
+   * 22.3 GB speech-stack (Poland, 894 Mbps: 10.4 min; babelcast-gpu's hosts: 8.6–9.0 min every time).
    */
   imageBoots?: ReadonlyMap<number, number>;
 }

@@ -54,7 +54,7 @@ describe('boot phases', () => {
     )[0]!;
     // 15/10/2026: two Bulgarian hosts sat 15 min in pulling; a 2000 Mbps host promises the 22.3 GB image in 1.5 min.
     expect(pulling(13, 1.5)).toMatchObject({ stuck: true, expectedMinutes: SLOW_PULL_FLOOR_MINUTES });
-    // babelcast-3090, 19/10/2026: every pull of that image took 8.6–9.0 min, whatever the host promised — kept.
+    // babelcast-gpu, 19/10/2026: every pull of that image took 8.6–9.0 min, whatever the host promised — kept.
     expect(pulling(9, 1.5).stuck).toBe(false);
     expect(pulling(9).stuck).toBe(false);
     // Poland, 894 Mbps (3.3 min promised), pulled in 10.4 min: kept.

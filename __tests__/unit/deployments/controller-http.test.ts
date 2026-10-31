@@ -86,6 +86,14 @@ describe('deployments API', () => {
     expect((await call(h, 'PUT', '/v1/deployments/x', { profile: 'cpu-echo' }, SITE)).status).toBe(403);
   });
 
+  it('the GPU deployment still answers to its former name babelcast-3090, so installed apps keep waking it', async () => {
+    await call(h, 'PUT', '/v1/deployments/babelcast-gpu', { profile: 'cpu-echo' });
+    const old = await (await call(h, 'GET', '/v1/deployments/babelcast-3090')).json() as { name: string };
+    expect(old.name).toBe('babelcast-gpu');
+    expect((await call(h, 'POST', '/v1/deployments/babelcast-3090/wake', {})).status).toBe(202);
+    await until(() => h.cloud.machines.size === 1);
+  });
+
   it('GET /v1/deployments lists the declared deployments for an admin, not for an app-scoped key', async () => {
     const d = await harness({ declaredStatus: () => [{ name: 'parle-speech', state: 'pending', reason: 'GHCR_READ_TOKEN is not set' }] });
     extra.push(d);
