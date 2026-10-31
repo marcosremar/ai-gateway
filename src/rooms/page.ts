@@ -924,7 +924,7 @@ function stopAudio(){
 function pump(){
   pumpTimer=null;if(!dub||!actx)return;
   var t=actx.currentTime,durs=pending.map(function(c){return c.buf?c.buf.duration:0});
-  var n=backlogDrop(qEnd-t,durs,MAX_BACKLOG_S),gone={},dropped=0;
+  var n=backlogDrop(qEnd-t,durs,(room&&room.dubBacklogS)||MAX_BACKLOG_S),gone={},dropped=0;
   for(var i=0;i<n;i++){var id=pending[i].lineId;if(M(id).startedAt==null&&!gone[id]){gone[id]=1;dropped++}}
   if(dropped){stat.drops+=dropped;track('audio',{action:'drop',n:dropped});
     pending=pending.filter(function(c){return !gone[c.lineId]});for(var k in gone){var dm=M(k);dm.pending=false;dm.skip=true}}
@@ -1118,6 +1118,7 @@ function connect(){
     else if(m.type==='audio')onAudio(m);
     else if(m.type==='audio-chunk')onAudioChunk(m);
     else if(m.type==='update'){if(room)room.youtubeUrl=m.youtubeUrl;applyYoutube(m.youtubeUrl);
+      if(room&&m.dubBacklogS)room.dubBacklogS=m.dubBacklogS;
       if(room&&m.dubLangs){room.dubLangs=m.dubLangs;room.listenLangs=m.listenLangs;buildSelect();updateDubButton()}}
     else if(m.type==='ended')showEnded();};
   s.onclose=function(){if(ping)clearInterval(ping);if(ws===s)ws=null;if(ended||gone)return;

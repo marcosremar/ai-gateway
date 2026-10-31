@@ -37,6 +37,8 @@ export interface RoomMeta {
   youtubeUrl?: string | null;
   /** Additive: false = the gateway never voices this room's lines itself (absent = true). */
   serverDub?: boolean;
+  /** Additive: true = realtime dubbing (the presenter's advanced option): no line lost, the voice fits the speech time. */
+  steadyDub?: boolean;
 }
 
 /** `GET /v1/rooms/:code` and the WS `snapshot.room`. */
@@ -58,13 +60,15 @@ export interface PublicRoom {
   dubLangs?: string[];
   /** Additive: languages the presenter does not publish that the server translates and voices on demand. */
   listenLangs?: string[];
+  /** Seconds of dubbed voice the page may queue before dropping the oldest clip (`ROOM_DUB_STEADY`); absent = the page's default. */
+  dubBacklogS?: number;
   lines: RoomLine[];
 }
 
 export type RoomServerMessage =
   | { type: 'snapshot'; room: PublicRoom }
   /** Room fields changed after creation (`PATCH /v1/rooms/:code`). */
-  | { type: 'update'; youtubeUrl: string | null; dubLangs?: string[]; listenLangs?: string[] }
+  | { type: 'update'; youtubeUrl: string | null; dubLangs?: string[]; listenLangs?: string[]; dubBacklogS?: number }
   | { type: 'line'; line: RoomLine }
   /** `wav` carries the base64 clip whatever its container; `format` (additive) names it when not WAV (`mp3`). */
   | { type: 'audio'; lineId: number; lang: string; wav: string; format?: string; engine?: RoomVoiceEngine }

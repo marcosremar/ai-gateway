@@ -218,8 +218,8 @@ export async function* trimStreamSilence(pcm: AsyncIterable<Buffer>, rate = PCM_
   if (started && held.length) yield held.subarray(0, Math.min(margin, held.length));
 }
 
-export function trimSilence(wav: Buffer): Buffer {
-  if (wav.length < 44 || wav.subarray(0, 4).toString('latin1') !== 'RIFF') return wav;
+function wavLayout(wav: Buffer): { channels: number; rate: number; start: number; end: number } | null {
+  if (wav.length < 44 || wav.subarray(0, 4).toString('latin1') !== 'RIFF') return null;
   let channels = 0, rate = 0, bits = 0, start = 0, end = 0;
   for (let at = 12; at + 8 <= wav.length;) {
     const id = wav.subarray(at, at + 4).toString('latin1');
@@ -228,7 +228,13 @@ export function trimSilence(wav: Buffer): Buffer {
     if (id === 'data') { start = at + 8; end = Math.min(wav.length, start + size); break; }
     at += 8 + size + (size & 1);
   }
-  if (!start || bits !== 16 || !channels || !rate) return wav;
+  return start && bits === 16 && channels && rate ? { channels, rate, start, end } : null;
+}
+
+export function trimSilence(wav: Buffer): Buffer {
+  const layout = wavLayout(wav);
+  if (!layout) return wav;
+  const { channels, rate, start, end } = layout;
   const frame = channels * 2;
   const win = Math.max(1, Math.round(rate / 50)) * frame;
   const loudness: number[] = [];
@@ -265,6 +271,115 @@ export function catchUpSpeed(queuedMs: number): number {
   return Math.round(Math.min(TTS_MAX_SPEED, 1 + Math.max(0, queuedMs) / SPEED_RAMP_MS) * 20) / 20;
 }
 
+const STRETCH_WINDOW = 960;
+const STRETCH_HOP = STRETCH_WINDOW / 2;
+const STRETCH_SEEK = 240;
+const STRETCH_WEIGHTS = Float32Array.from({ length: STRETCH_WINDOW }, (_, i) => Math.sin((Math.PI * i) / STRETCH_WINDOW) ** 2);
+
+export class PcmStretcher {
+  private input = new Float32Array(0);
+  private dropped = 0;
+  private analysis = 0;
+  private previous = -1;
+  private tail = new Float32Array(STRETCH_HOP);
+
+  constructor(private readonly speed: number) {}
+
+  push(pcm: Buffer): Buffer {
+    const added = new Float32Array(pcm.length >> 1);
+    for (let i = 0; i < added.length; i++) added[i] = pcm.readInt16LE(i * 2);
+    this.append(added);
+    return this.frames(Infinity);
+  }
+
+  end(): Buffer {
+    const last = this.dropped + this.input.length;
+    this.append(new Float32Array(STRETCH_WINDOW + STRETCH_SEEK));
+    return Buffer.concat([this.frames(last), toPcm(Array.from(this.tail))]);
+  }
+
+  private append(samples: Float32Array): void {
+    const joined = new Float32Array(this.input.length + samples.length);
+    joined.set(this.input);
+    joined.set(samples, this.input.length);
+    this.input = joined;
+  }
+
+  private at(index: number): number {
+    return this.input[index - this.dropped] ?? 0;
+  }
+
+  private frames(stopAt: number): Buffer {
+    const out: number[] = [];
+    const available = this.dropped + this.input.length;
+    while (this.analysis < stopAt) {
+      const ideal = Math.round(this.analysis);
+      if (ideal + STRETCH_SEEK + STRETCH_WINDOW > available) break;
+      const start = this.previous < 0 ? ideal : this.bestStart(ideal);
+      for (let i = 0; i < STRETCH_HOP; i++) out.push(this.tail[i]! + this.at(start + i) * STRETCH_WEIGHTS[i]!);
+      for (let i = 0; i < STRETCH_HOP; i++) this.tail[i] = this.at(start + STRETCH_HOP + i) * STRETCH_WEIGHTS[STRETCH_HOP + i]!;
+      this.previous = start;
+      this.analysis += STRETCH_HOP * this.speed;
+    }
+    const keepFrom = Math.min(this.previous + STRETCH_HOP, Math.round(this.analysis) - STRETCH_SEEK);
+    if (keepFrom > this.dropped) {
+      this.input = this.input.slice(keepFrom - this.dropped);
+      this.dropped = keepFrom;
+    }
+    return toPcm(out);
+  }
+
+  private bestStart(ideal: number): number {
+    const target = this.previous + STRETCH_HOP;
+    let best = ideal, bestScore = -Infinity;
+    for (let candidate = Math.max(this.dropped, ideal - STRETCH_SEEK); candidate <= ideal + STRETCH_SEEK; candidate += 2) {
+      let dot = 0, energy = 1;
+      for (let i = 0; i < STRETCH_HOP; i += 2) {
+        const sample = this.at(candidate + i);
+        dot += sample * this.at(target + i);
+        energy += sample * sample;
+      }
+      const score = dot / Math.sqrt(energy);
+      if (score > bestScore) { bestScore = score; best = candidate; }
+    }
+    return best;
+  }
+}
+
+function toPcm(samples: number[]): Buffer {
+  const pcm = Buffer.alloc(samples.length * 2);
+  samples.forEach((sample, i) => pcm.writeInt16LE(Math.max(-32768, Math.min(32767, Math.round(sample))), i * 2));
+  return pcm;
+}
+
+export async function* stretchPcm(pcm: AsyncIterable<Buffer>, speed: number): AsyncGenerator<Buffer> {
+  const stretcher = new PcmStretcher(speed);
+  for await (const chunk of pcm) {
+    const out = stretcher.push(chunk);
+    if (out.length) yield out;
+  }
+  yield stretcher.end();
+}
+
+export function stretchWav(wav: Buffer, speed: number): Buffer {
+  const layout = wavLayout(wav);
+  if (!layout || layout.channels !== 1) return wav;
+  const stretcher = new PcmStretcher(speed);
+  const pcm = wav.subarray(layout.start, layout.end - ((layout.end - layout.start) % 2));
+  return pcmToWav(Buffer.concat([stretcher.push(pcm), stretcher.end()]), layout.rate);
+}
+
+export function stretchClip(clip: TtsClip, speed: number): TtsClip {
+  if (speed <= 1) return clip;
+  if (clip.pcm) return { ...clip, pcm: stretchPcm(clip.pcm, speed) };
+  return clip.format === 'wav' ? { ...clip, audio: stretchWav(clip.audio, speed) } : clip;
+}
+
+export function trimClip(clip: TtsClip): TtsClip {
+  if (clip.pcm) return { ...clip, pcm: trimStreamSilence(clip.pcm) };
+  return clip.format === 'wav' ? { ...clip, audio: trimSilence(clip.audio) } : clip;
+}
+
 const MP3_KBPS_V1 = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320];
 const MP3_KBPS_V2 = [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160];
 const MP3_RATES: Record<number, number[]> = { 3: [44_100, 48_000, 32_000], 2: [22_050, 24_000, 16_000], 0: [11_025, 12_000, 8_000] };
@@ -287,14 +402,18 @@ export function mp3DurationMs(buf: Buffer): number {
 
 export const TTS_MAX_PARALLEL = 6;
 export const TTS_MAX_WAITING = 4;
+export const TTS_MERGE_AFTER_MS = 8_000;
+export const TTS_MAX_MERGED = 4;
 
 export const PCM_CHUNK_MIN_BYTES = PCM_BYTES_PER_MS * 250;
 
 export interface TtsStreamOptions {
-  synthesize: (id: number, speed: number) => Promise<TtsClip | null>;
+  synthesize: (id: number, speed: number, merged: number[]) => Promise<TtsClip | null>;
   deliver: (id: number, clip: TtsClip, streamed: boolean) => boolean;
   deliverChunk?: (id: number, pcm: Buffer, seq: number) => boolean;
   dropped: (id: number) => void;
+  /** Read at each sentence. True = never drops: from `TTS_MERGE_AFTER_MS` of queue (or a full line) the waiting sentences go out as one. */
+  mergesWaiting?: () => boolean;
   now: () => number;
   /** Calls at once, read before each start (default TTS_MAX_PARALLEL): 1 for a provider that speaks one sentence at a time. */
   maxParallel?: () => number;
@@ -320,7 +439,7 @@ export class TtsStream {
   push(id: number, readyAt: number): void {
     this.waiting.push({ id, readyAt });
     this.waiting.sort((a, b) => a.id - b.id);
-    if (this.waiting.length > TTS_MAX_WAITING) this.opts.dropped(this.waiting.shift()!.id);
+    if (!this.opts.mergesWaiting?.() && this.waiting.length > TTS_MAX_WAITING) this.opts.dropped(this.waiting.shift()!.id);
     this.pump();
   }
 
@@ -341,10 +460,11 @@ export class TtsStream {
         this.timer.unref?.();
         return;
       }
+      const queuedMs = this.playEnd - this.opts.now() + this.jobs.length * this.clipMs;
+      const merged = this.mergeable(queuedMs);
       const job: Job = { id: this.waiting.shift()!.id, parts: [], sent: 0, ended: false, muted: false };
       this.jobs.push(job);
-      const queuedMs = this.playEnd - this.opts.now() + (this.jobs.length - 1) * this.clipMs;
-      void this.opts.synthesize(job.id, catchUpSpeed(queuedMs)).catch(() => null).then(async clip => {
+      void this.opts.synthesize(job.id, catchUpSpeed(queuedMs), merged).catch(() => null).then(async clip => {
         job.clip = clip;
         if (clip?.pcm) await this.read(job, clip.pcm);
         job.ended = true;
@@ -352,6 +472,12 @@ export class TtsStream {
         this.pump();
       });
     }
+  }
+
+  private mergeable(queuedMs: number): number[] {
+    if (!this.opts.mergesWaiting?.() || this.waiting.length < 2) return [];
+    if (queuedMs < TTS_MERGE_AFTER_MS && this.waiting.length <= TTS_MAX_WAITING) return [];
+    return this.waiting.splice(0, Math.min(this.waiting.length, TTS_MAX_MERGED) - 1).map(w => w.id);
   }
 
   private async read(job: Job, pcm: AsyncIterable<Buffer>): Promise<void> {

@@ -17,13 +17,14 @@
 // Failures are logged, never thrown into the publish path.
 
 import {
-  KOKORO_VOICES, POCKET_LANGUAGE_CODES, QWEN_LANGUAGES, TTS_MAX_PARALLEL, TTS_MAX_SPEED, TtsStream, kokoroVoice, pocketRoomVoice, primaryLanguage as primary, qwenSpeaks,
+  KOKORO_VOICES, POCKET_LANGUAGE_CODES, QWEN_LANGUAGES, TTS_MAX_PARALLEL, TTS_MAX_SPEED, TtsStream, kokoroVoice, pocketRoomVoice, primaryLanguage as primary, qwenSpeaks, stretchClip, trimClip,
   type DeploymentClone, type LanguageTts, type TtsClip, type VoiceRef,
 } from '../tts';
 import type { LiveRoom } from './service';
 import type { RoomLine } from './types';
 
 export type RoomTranslate = (text: string, from: string | null, to: string) => Promise<string>;
+export type RoomCondense = (text: string, lang: string, maxChars: number) => Promise<string>;
 
 export interface ChatLike {
   chat(req: { model: string; messages: { role: 'system' | 'user'; content: string }[]; temperature?: number; timeoutMs?: number; extraBody?: Record<string, unknown> }): Promise<{ content: string }>;
@@ -31,6 +32,10 @@ export interface ChatLike {
 
 const TRANSLATE_MODEL = 'google/gemini-2.5-flash-lite';
 const TRANSLATE_TIMEOUT_MS = 6_000;
+const CONDENSE_TIMEOUT_MS = 6_000;
+const VOICE_CHARS_PER_SECOND = 16.5;
+const SHORTEST_VOICE_SHARE = 0.6;
+const WORTH_SHORTENING_SHARE = 0.9;
 const errorText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 const languageName = (code: string): string => new Intl.DisplayNames(['en'], { type: 'language' }).of(code) ?? code;
 
@@ -46,6 +51,22 @@ export const openRouterTranslate = (provider: ChatLike): RoomTranslate => async 
     ],
   });
   return res.content.trim();
+};
+
+export const spokenText = (reply: string): string => reply.replace(/\s*\(\d+[^)]*\)\s*$/u, '').replace(/[*"“”«»]/gu, '').trim();
+
+export const openRouterCondense = (provider: ChatLike): RoomCondense => async (text, lang, maxChars) => {
+  const res = await provider.chat({
+    model: TRANSLATE_MODEL,
+    temperature: 0,
+    timeoutMs: CONDENSE_TIMEOUT_MS,
+    extraBody: { reasoning: { enabled: false } },
+    messages: [
+      { role: 'system', content: `This is what a speaker just said, for a live voice-over in ${languageName(lang)}. Say the same thing in ${languageName(lang)} in at most ${maxChars} characters. The listener must get every idea, fact, name and number; the words can change freely, and only filler, repetition and wording may go. Reply with the new text only.` },
+      { role: 'user', content: text },
+    ],
+  });
+  return spokenText(res.content);
 };
 
 export type RoomVoiceClone = DeploymentClone;
@@ -68,6 +89,8 @@ export interface RoomDubberOptions {
   deliver: (room: LiveRoom, lineId: number, lang: string, clip: TtsClip, streamed: boolean) => void;
   deliverChunk: (room: LiveRoom, lineId: number, lang: string, pcm: Buffer, seq: number) => void;
   translate?: RoomTranslate;
+  /** Says a text in fewer characters, keeping its whole meaning (never the subtitle); only in a `steadyDub` room. */
+  condense?: RoomCondense;
   addTranslation: (room: LiveRoom, lineId: number, lang: string, text: string) => void;
   /** Wait after a line before voicing it, so the presenter's own clip can arrive first. */
   waitMs: number;
@@ -203,7 +226,8 @@ export class RoomDubber {
       done: [],
       stream: new TtsStream({
         now: this.opts.now,
-        synthesize: (lineId, speed) => this.voice(room, s, lang, ls, lineId, speed),
+        synthesize: (lineId, speed, merged) => this.voice(room, s, lang, ls, lineId, speed, merged),
+        mergesWaiting: () => room.meta.steadyDub === true,
         deliver: (lineId, clip, streamed) => {
           // Re-check: the presenter may have voiced it meanwhile, the listeners may be gone.
           if (!this.stillWanted(room, s, lineId, lang)) return false;
@@ -230,17 +254,35 @@ export class RoomDubber {
     return this.rooms.get(room.meta.code) === s && Boolean(this.wanted(room, s, lineId, lang)?.listen);
   }
 
-  private async voice(room: LiveRoom, s: RoomState, lang: string, ls: LangState, lineId: number, speed: number): Promise<TtsClip | null> {
+  private async voice(room: LiveRoom, s: RoomState, lang: string, ls: LangState, lineId: number, speed: number, merged: number[]): Promise<TtsClip | null> {
     const want = this.wanted(room, s, lineId, lang);
     if (!want) return null;
-    ls.done.push(lineId);
-    if (ls.done.length > DONE_KEEP) ls.done.shift();
+    ls.done.push(...merged, lineId);
+    if (ls.done.length > DONE_KEEP) ls.done.splice(0, ls.done.length - DONE_KEEP);
     try {
-      const text = want.line.translations[lang]?.trim() || await this.translate(room, want.line, lang);
-      return want.listen ? await this.speak(room, s, want.line, speakable(text), lang, speed) : null;
+      const lines = [...merged.map(id => this.wanted(room, s, id, lang)?.line).filter(line => line !== undefined), want.line];
+      const texts = await Promise.all(lines.map(async line => line.translations[lang]?.trim() || await this.translate(room, line, lang)));
+      if (!want.listen) return null;
+      const text = texts.map(speakable).join(' ');
+      const voiced = room.meta.steadyDub ? await this.fitted(text, lines, lang) : texts.at(-1)!;
+      return await this.speak(room, s, want.line, speakable(voiced), lang, speed);
     } catch (err) {
       this.opts.log('rooms: server dub failed', { code: room.meta.code, lang, lineId, error: err instanceof Error ? err.message : String(err) });
       return null;
+    }
+  }
+
+  private async fitted(text: string, lines: RoomLine[], lang: string): Promise<string> {
+    const spokenMs = lines.reduce((sum, line) => sum + (line.speechMs ?? 0), 0);
+    const fits = lines.length > 1 ? 0 : spokenMs ? (spokenMs / 1000) * VOICE_CHARS_PER_SECOND : text.length;
+    const maxChars = Math.round(Math.max(fits, text.length * SHORTEST_VOICE_SHARE));
+    if (!this.opts.condense || maxChars >= text.length * WORTH_SHORTENING_SHARE) return text;
+    try {
+      const short = await this.opts.condense(text, lang, maxChars);
+      return short && short.length < text.length ? short : text;
+    } catch (err) {
+      this.opts.log('rooms: shortening the dub failed, full text', { lang, error: errorText(err) });
+      return text;
     }
   }
 
@@ -248,7 +290,7 @@ export class RoomDubber {
     const voice = this.cloning(room) ? s.voices.get(primary(line.originalLang ?? room.meta.originalLang ?? '')) : undefined;
     if (voice) {
       try {
-        return { ...await this.opts.clone!.synthesize(text, lang, voice), engine: 'clone' };
+        return this.paced(room, { ...await this.opts.clone!.synthesize(text, lang, voice), engine: 'clone' }, speed);
       } catch (err) {
         if (!this.stockSpeaks(lang)) throw err;
         this.opts.log('rooms: voice clone failed, stock voice instead', { code: room.meta.code, lang, lineId: line.id, error: errorText(err) });
@@ -257,13 +299,21 @@ export class RoomDubber {
     if (this.pocketSpeaks(lang)) {
       try {
         // No speed: Pocket has none (see pocketTts) — the speaker's pace and the catch-up apply to Kokoro only.
-        return { ...await this.opts.pocket!.synthesize(text, lang), engine: 'pocket' };
+        return this.paced(room, this.trimmed(room, { ...await this.opts.pocket!.synthesize(text, lang), engine: 'pocket' }), speed);
       } catch (err) {
         if (!kokoroVoice(lang)) throw err;
         this.opts.log('rooms: Pocket failed, Kokoro instead', { code: room.meta.code, lang, lineId: line.id, error: errorText(err) });
       }
     }
-    return { ...await this.opts.synthesize(text, lang, pacedSpeed(speed, line)), engine: 'kokoro' };
+    return this.trimmed(room, { ...await this.opts.synthesize(text, lang, pacedSpeed(speed, line)), engine: 'kokoro' });
+  }
+
+  private trimmed(room: LiveRoom, clip: TtsClip): TtsClip {
+    return room.meta.steadyDub ? trimClip(clip) : clip;
+  }
+
+  private paced(room: LiveRoom, clip: TtsClip, speed: number): TtsClip {
+    return room.meta.steadyDub ? stretchClip(clip, speed) : clip;
   }
 
   private async translate(room: LiveRoom, line: RoomLine, lang: string): Promise<string> {

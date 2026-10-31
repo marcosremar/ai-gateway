@@ -62,17 +62,19 @@ export interface CreateRoomInput {
 }
 
 /** `PATCH /v1/rooms/:code`: the room fields a publisher may change after creation. */
-export interface UpdateRoomInput { youtubeUrl?: string | null; serverDub?: boolean }
+export interface UpdateRoomInput { youtubeUrl?: string | null; serverDub?: boolean; steadyDub?: boolean }
 
 export function parseUpdate(body: unknown): UpdateRoomInput {
   if (!isObject(body)) throw new RoomError(400, 'body must be a JSON object');
-  if (!('youtubeUrl' in body) && !('serverDub' in body)) {
-    throw new RoomError(400, 'nothing to update: send {"youtubeUrl": "<link>" | null} and/or {"serverDub": true | false}');
+  if (!('youtubeUrl' in body) && !('serverDub' in body) && !('steadyDub' in body)) {
+    throw new RoomError(400, 'nothing to update: send {"youtubeUrl": "<link>" | null} and/or {"serverDub": true | false} and/or {"steadyDub": true | false}');
   }
   if ('serverDub' in body && typeof body.serverDub !== 'boolean') throw new RoomError(400, 'serverDub must be a boolean');
+  if ('steadyDub' in body && typeof body.steadyDub !== 'boolean') throw new RoomError(400, 'steadyDub must be a boolean');
   return {
     ...('youtubeUrl' in body ? { youtubeUrl: parseYoutubeUrl(body.youtubeUrl) } : {}),
     ...('serverDub' in body ? { serverDub: body.serverDub as boolean } : {}),
+    ...('steadyDub' in body ? { steadyDub: body.steadyDub as boolean } : {}),
   };
 }
 

@@ -7,7 +7,7 @@
 import { createHash, randomBytes, randomInt, timingSafeEqual } from 'crypto';
 import type { RoomsConfig } from './config';
 import { PCM_RATE, type LanguageTts, type TtsClip } from '../tts';
-import { RoomDubber, type RoomPocket, type RoomTranslate, type RoomVoiceClone } from './dub';
+import { RoomDubber, type RoomCondense, type RoomPocket, type RoomTranslate, type RoomVoiceClone } from './dub';
 import type { RoomStore } from './store';
 import { AttemptLimiter, type Window } from '../accounts/rate-limit';
 import type { PublicRoom, RoomLine, RoomMeta, RoomServerMessage } from './types';
@@ -54,12 +54,15 @@ export interface RoomServiceOptions {
   /** False while the synthesizer cannot work (e.g. no API key). */
   synthesizeAvailable?: () => boolean;
   translate?: RoomTranslate;
+  condense?: RoomCondense;
   clone?: RoomVoiceClone;
   /** Pocket TTS, the first stock voice for its languages (Kokoro behind it). */
   pocket?: RoomPocket;
 }
 
 const HOUR_MS = 3_600_000;
+const STEADY_DUB_BACKLOG_S = 600;
+const PAGE_DUB_BACKLOG_S = 6;
 /** lastActivityAt is re-saved at most this often while lines flow (the lines file mtime covers the gap). */
 const META_SAVE_EVERY_MS = 5 * 60_000;
 /** A room with no viewer, untouched for this long, leaves memory (it stays in the store). */
@@ -97,7 +100,7 @@ export class RoomService {
         synthesize: opts.synthesize, available: opts.synthesizeAvailable, clone: opts.clone, pocket: opts.pocket,
         deliver: (room, lineId, lang, clip, streamed) => this.deliverServerClip(room, lineId, lang, clip, streamed),
         deliverChunk: (room, lineId, lang, pcm, seq) => this.deliverServerChunk(room, lineId, lang, pcm, seq),
-        translate: opts.translate, addTranslation: (room, lineId, lang, text) => this.addTranslation(room, lineId, lang, text),
+        translate: opts.translate, condense: opts.condense, addTranslation: (room, lineId, lang, text) => this.addTranslation(room, lineId, lang, text),
         waitMs: opts.config.serverDubWaitMs, presenterQuietMs: opts.config.serverDubPresenterQuietMs, now: this.now, log: this.log,
       })
       : null;
@@ -232,6 +235,7 @@ export class RoomService {
       youtubeUrl: typeof m.youtubeUrl === 'string' ? m.youtubeUrl : null,
       ...(this.dubber ? { dubLangs: [...this.dubLangs(room), ...extra] } : {}),
       ...(extra.length ? { listenLangs: extra } : {}),
+      ...(m.steadyDub ? { dubBacklogS: STEADY_DUB_BACKLOG_S } : {}),
       lines: room.lines,
     };
   }
@@ -378,16 +382,24 @@ export class RoomService {
     const dubBefore = room.meta.serverDub !== false;
     const youtubeUrl = input.youtubeUrl === undefined ? youtubeBefore : input.youtubeUrl;
     const serverDub = input.serverDub ?? dubBefore;
-    if (youtubeUrl === youtubeBefore && serverDub === dubBefore) return;
+    const steadyBefore = room.meta.steadyDub === true;
+    const steadyDub = input.steadyDub ?? steadyBefore;
+    if (youtubeUrl === youtubeBefore && serverDub === dubBefore && steadyDub === steadyBefore) return;
     room.meta.youtubeUrl = youtubeUrl;
     if (serverDub) delete room.meta.serverDub;
     else room.meta.serverDub = false;
+    if (steadyDub) room.meta.steadyDub = true;
+    else delete room.meta.steadyDub;
     room.meta.lastActivityAt = this.now();
     room.touchedAt = this.now();
     room.metaSavedAt = this.now();
     await this.opts.store.saveMeta(room.meta);
-    this.log('rooms: updated', { code: room.meta.code, youtube: youtubeUrl !== null, serverDub });
-    this.broadcast(room, { type: 'update', youtubeUrl, ...(serverDub !== dubBefore && this.dubber ? this.listenLangs(room) : {}) });
+    this.log('rooms: updated', { code: room.meta.code, youtube: youtubeUrl !== null, serverDub, steadyDub });
+    this.broadcast(room, {
+      type: 'update', youtubeUrl,
+      ...(serverDub !== dubBefore && this.dubber ? this.listenLangs(room) : {}),
+      ...(steadyDub !== steadyBefore ? { dubBacklogS: steadyDub ? STEADY_DUB_BACKLOG_S : PAGE_DUB_BACKLOG_S } : {}),
+    });
   }
 
   /** A clip the server synthesized: only to the viewers listening to that language. */
