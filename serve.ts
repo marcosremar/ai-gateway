@@ -70,7 +70,7 @@ import {
 import { createRealtime } from './src/realtime';
 import { createTranscriptionStream, STT_STREAM_PATH } from './src/gateway/proxy/routes/transcription-stream';
 import { createTtsEngineRoute, TTS_ENGINE_PATH } from './src/gateway/proxy/routes/tts-engine';
-import { createRooms, openRouterCondense, openRouterTranslate } from './src/rooms';
+import { createRooms, openRouterTranslate } from './src/rooms';
 import { createCalls } from './src/calls';
 import { KOKORO_MODEL, POCKET_TTS_MODEL, deploymentClone, kokoroTts, pocketTts } from './src/tts';
 import { appTelemetryFromEnv } from './src/app-telemetry';
@@ -618,7 +618,6 @@ const rooms = createRooms({
     synthesize: pocketTts(() => (roomPocket.isConfigured() ? [{ providerId: POCKET_PROVIDER, provider: roomPocket, model: POCKET_TTS_MODEL }] : [])),
   },
   translate: openRouterTranslate(openrouterLLM),
-  condense: openRouterCondense(openrouterLLM),
   ...(controller && { clone: deploymentClone(controller, process.env.ROOM_VOICE_CLONE_DEPLOYMENT?.trim() || 'babelcast-tts-clone') }),
 });
 log.log({

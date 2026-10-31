@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CircuitBreakerRegistry } from '../../../src/gateway/providers/cloud/circuit-breaker';
 import {
-  PCM_CHUNK_MIN_BYTES, QWEN_CLONE_MODEL, TTS_CALL_TIMEOUT_MS, TTS_MAX_SPEED, TtsStream, catchUpSpeed, deploymentClone, kokoroTts, kokoroVoice, mp3DurationMs,
+  PCM_CHUNK_MIN_BYTES, QWEN_CLONE_MODEL, TTS_CALL_TIMEOUT_MS, TTS_MAX_SPEED, TtsStream, catchUpSpeed, deploymentClone, steadySpeed, kokoroTts, kokoroVoice, mp3DurationMs,
   PcmStretcher, pcmOfWavStream, pcmToWav, qwenCloneTts, qwenSpeaks, stretchPcm, stretchWav, trimSilence, trimStreamSilence, wavDurationMs, type TtsClip,
 } from '../../../src/tts';
 import { DeploymentError } from '../../../src/deployments/controller-state';
@@ -276,5 +276,14 @@ describe('time-stretch for the catch-up of voices without a speed (Pocket, the c
     const wav = pcmToWav(sine(220, 2));
     expect(wavDurationMs(stretchWav(wav, 1.25))).toBeCloseTo(1600, -2);
     expect(stretchWav(Buffer.from('not audio'), 1.25)).toEqual(Buffer.from('not audio'));
+  });
+});
+
+describe('realtime dubbing pace', () => {
+  it('runs at 1.1× and reaches 1.5× from 10 s of queue', () => {
+    expect(steadySpeed(0)).toBe(1.1);
+    expect(steadySpeed(4_000)).toBe(1.2);
+    expect(steadySpeed(10_000)).toBe(1.5);
+    expect(steadySpeed(60_000)).toBe(1.5);
   });
 });
