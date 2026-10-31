@@ -4,7 +4,7 @@
  * each), Kokoro for the others and whenever Pocket answers 503 loading/busy or fails; Kokoro alone without the key.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { MemoryRoomStore, RoomService, roomsConfigFromEnv, spokenText } from '../../../src/rooms';
+import { MemoryRoomStore, RoomService, roomsConfigFromEnv } from '../../../src/rooms';
 import { CircuitBreakerRegistry } from '../../../src/gateway/providers/cloud/circuit-breaker';
 import { POCKET_VOICES } from '../../../src/gateway/providers/cloud/kokoro-stream/route-tts';
 import { pcmToWav, pocketTts, wavDurationMs, type TtsClip, type VoiceRef } from '../../../src/tts';
@@ -256,7 +256,6 @@ describe('realtime dubbing (steadyDub): every voice keeps up with the speaker wi
   };
   const durations = (v: FakeViewer) => audios(v).map(a => Math.round(wavDurationMs(Buffer.from(a.wav, 'base64'))));
   const long = 'nous allons maintenant parler des chiffres du trimestre et de la croissance';
-  let condense: ReturnType<typeof vi.fn<(text: string, lang: string) => Promise<string>>>;
 
   let steadyOn = false;
   const steadyRoom = async (languages: string[]): Promise<LiveRoom> => {
@@ -268,19 +267,12 @@ describe('realtime dubbing (steadyDub): every voice keeps up with the speaker wi
   function steadyService(steady: boolean): RoomService {
     steadyOn = steady;
     service.stop();
-    condense = vi.fn(async () => 'chiffres du trimestre et croissance');
     return new RoomService({
       config: { ...roomsConfigFromEnv({}), dir: null, serverDubWaitMs: WAIT, serverDubPresenterQuietMs: 60_000 },
       store: new MemoryRoomStore(), sweepIntervalMs: 0, log, synthesize: kokoro,
-      pocket: { synthesize: pocket, available: () => true }, condense,
+      pocket: { synthesize: pocket, available: () => true },
     });
   }
-
-  it('keeps only what can be spoken from the model reply', () => {
-    expect(spokenText('"Ralentissez, on est trop proches." (79)')).toBe('Ralentissez, on est trop proches.');
-    expect(spokenText('*"Point stratégique : la muraille."* (53 chars)')).toBe('Point stratégique : la muraille.');
-    expect(spokenText('En 2020, 14 personnes.')).toBe('En 2020, 14 personnes.');
-  });
 
   it('is off until the room asks for it, and the open pages get the new queue', async () => {
     service = steadyService(false);
@@ -311,10 +303,11 @@ describe('realtime dubbing (steadyDub): every voice keeps up with the speaker wi
     service.addViewer(r, fr);
     await service.publishLine(r, line(1));
     await vi.advanceTimersByTimeAsync(0);
-    expect(durations(fr)).toEqual([3400]);
+    expect(durations(fr)[0]).toBeLessThan(3_200);
+    expect(durations(fr)[0]).toBeGreaterThan(3_000);
   });
 
-  it('rewrites a line longer than its speech time, for the voice only, and speeds Pocket up when behind', async () => {
+  it('the voice loses filler and speeds up when behind, the subtitle stays whole', async () => {
     service = steadyService(true);
     pocket.mockResolvedValue({ audio: loud(10), format: 'wav' });
     const r = await steadyRoom(['fr']);
@@ -322,27 +315,13 @@ describe('realtime dubbing (steadyDub): every voice keeps up with the speaker wi
     service.addViewer(r, fr);
     await service.publishLine(r, line(1));
     await vi.advanceTimersByTimeAsync(0);
-    await service.publishLine(r, { ...line(2, { fr: long }), speechMs: 2_000 });
+    await service.publishLine(r, line(2, { fr: 'Ici, sur le chemin. Ici, sur le chemin, tu vois ?' }));
     await vi.advanceTimersByTimeAsync(0);
-    expect(condense).toHaveBeenCalledWith(`${long}.`, 'fr', 46);
-    expect(pocket.mock.calls.map(c => c[0])).toEqual(['bonjour 1.', 'chiffres du trimestre et croissance.']);
-    expect(durations(fr)[1]).toBeLessThan(8_000);
-    expect(r.lines.find(l => l.id === 2)?.translations.fr).toBe(long);
-  });
-
-  it('a line that fits its speech time is voiced whole, and a failed rewrite voices the full text', async () => {
-    service = steadyService(true);
-    pocket.mockResolvedValue({ audio: loud(1), format: 'wav' });
-    const r = await steadyRoom(['fr']);
-    const fr = viewer('fr');
-    service.addViewer(r, fr);
-    await service.publishLine(r, { ...line(1, { fr: long }), speechMs: 6_000 });
-    await vi.advanceTimersByTimeAsync(0);
-    expect(condense).not.toHaveBeenCalled();
-    condense.mockRejectedValueOnce(new Error('timeout'));
-    await service.publishLine(r, { ...line(2, { fr: long }), speechMs: 1_000 });
-    await vi.advanceTimersByTimeAsync(0);
-    expect(pocket.mock.calls.map(c => c[0])).toEqual([`${long}.`, `${long}.`]);
+    expect(pocket.mock.calls.map(c => c[0])).toEqual(['bonjour 1.', 'Ici, sur le chemin?']);
+    const [first, second] = durations(fr);
+    expect(first).toBeLessThan(9_200);
+    expect(second).toBeLessThan(first!);
+    expect(r.lines.find(l => l.id === 2)?.translations.fr).toBe('Ici, sur le chemin. Ici, sur le chemin, tu vois ?');
   });
 
   it('never loses a line: the lines waiting behind a long clip go out together, at most 4 per clip', async () => {
@@ -358,8 +337,7 @@ describe('realtime dubbing (steadyDub): every voice keeps up with the speaker wi
     release({ audio: loud(1), format: 'wav' });
     await vi.advanceTimersByTimeAsync(0);
     await vi.advanceTimersByTimeAsync(0);
-    expect(condense).toHaveBeenCalledWith('bonjour 2. bonjour 3. bonjour 4. bonjour 5.', 'fr', 26);
-    expect(pocket).toHaveBeenCalledTimes(4);
+    expect(pocket.mock.calls[1]![0]).toBe('bonjour 2. bonjour 3. bonjour 4. bonjour 5.');
     expect(audios(fr).map(a => a.lineId)).toEqual([1, 5, 6, 7]);
     expect(log).not.toHaveBeenCalledWith('rooms: server dub dropped stale line', expect.anything());
   });
@@ -374,7 +352,7 @@ describe('realtime dubbing (steadyDub): every voice keeps up with the speaker wi
     await vi.advanceTimersByTimeAsync(0);
     await service.publishLine(r, line(2, { fr: long }));
     await vi.advanceTimersByTimeAsync(0);
-    expect(condense).not.toHaveBeenCalled();
+    expect(pocket.mock.calls.at(-1)![0]).toBe(`${long}.`);
     expect(durations(fr)).toEqual([10_000, 10_000]);
   });
 });

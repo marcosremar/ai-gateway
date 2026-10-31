@@ -267,6 +267,13 @@ export const clipDurationMs = (clip: TtsClip): number => (clip.format === 'wav' 
 export const TTS_MAX_SPEED = 1.3;
 const SPEED_RAMP_MS = 20_000;
 
+export const STEADY_BASE_SPEED = 1.1;
+export const STEADY_MAX_SPEED = 1.5;
+
+export function steadySpeed(queuedMs: number): number {
+  return Math.round(Math.min(STEADY_MAX_SPEED, Math.max(STEADY_BASE_SPEED, 1 + Math.max(0, queuedMs) / SPEED_RAMP_MS)) * 20) / 20;
+}
+
 export function catchUpSpeed(queuedMs: number): number {
   return Math.round(Math.min(TTS_MAX_SPEED, 1 + Math.max(0, queuedMs) / SPEED_RAMP_MS) * 20) / 20;
 }
@@ -414,6 +421,8 @@ export interface TtsStreamOptions {
   dropped: (id: number) => void;
   /** Read at each sentence. True = never drops: from `TTS_MERGE_AFTER_MS` of queue (or a full line) the waiting sentences go out as one. */
   mergesWaiting?: () => boolean;
+  /** Speed for the next sentence from the audio queued (default `catchUpSpeed`). */
+  speedFor?: (queuedMs: number) => number;
   now: () => number;
   /** Calls at once, read before each start (default TTS_MAX_PARALLEL): 1 for a provider that speaks one sentence at a time. */
   maxParallel?: () => number;
@@ -464,7 +473,7 @@ export class TtsStream {
       const merged = this.mergeable(queuedMs);
       const job: Job = { id: this.waiting.shift()!.id, parts: [], sent: 0, ended: false, muted: false };
       this.jobs.push(job);
-      void this.opts.synthesize(job.id, catchUpSpeed(queuedMs), merged).catch(() => null).then(async clip => {
+      void this.opts.synthesize(job.id, (this.opts.speedFor ?? catchUpSpeed)(queuedMs), merged).catch(() => null).then(async clip => {
         job.clip = clip;
         if (clip?.pcm) await this.read(job, clip.pcm);
         job.ended = true;
