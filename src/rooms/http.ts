@@ -1,7 +1,7 @@
 // ── AI Gateway — Live subtitle rooms: HTTP routes ────────────────────────────
 //   POST /v1/rooms                 gateway key (mounted as a proxy customRoute: the proxy's auth runs first)
 //   GET  /v1/rooms/:code           public transcript, CORS open
-//   PATCH /v1/rooms/:code          publish token: change room fields after creation ({"youtubeUrl"}, {"serverDub"})
+//   PATCH /v1/rooms/:code          publish token: change room fields after creation ({"youtubeUrl"}, {"serverDub"}, {"steadyDub"})
 //   POST /v1/rooms/:code/lines     publish token (or the creating / an admin gateway key)
 //   POST /v1/rooms/:code/audio     publish token; broadcast only
 //   PUT  /v1/rooms/:code/voice     publish token: the speaker's voice reference (memory only, never served)
@@ -197,7 +197,7 @@ export function createRoomsHttp(opts: RoomsHttpOptions) {
       const input = parseUpdate(await readJson(req, UPDATE_MAX_BYTES));
       await service.update(room, input);
       sendJson(res, 200, {
-        code: room.meta.code, youtubeUrl: room.meta.youtubeUrl ?? null, serverDub: room.meta.serverDub !== false,
+        code: room.meta.code, youtubeUrl: room.meta.youtubeUrl ?? null, serverDub: room.meta.serverDub !== false, ...(room.meta.steadyDub ? { steadyDub: true } : {}),
       });
       return;
     }

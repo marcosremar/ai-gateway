@@ -34,8 +34,6 @@ export interface RoomsConfig {
   serverDubWaitMs: number;
   /** A room whose presenter sent a clip within this window is not voiced by the server. */
   serverDubPresenterQuietMs: number;
-  /** `ROOM_DUB_STEADY=1`: every voice catches up (time-stretched), silences trimmed, text shortened when far behind. */
-  serverDubSteady: boolean;
 }
 
 export const ROOMS_DEFAULTS = {
@@ -83,6 +81,5 @@ export function roomsConfigFromEnv(env: Record<string, string | undefined> = pro
     serverDub: !['0', 'false', 'off', 'no'].includes((env.ROOM_SERVER_DUB ?? '').trim().toLowerCase()),
     serverDubWaitMs: Math.floor(positive(env.ROOM_SERVER_DUB_WAIT_MS, ROOMS_DEFAULTS.SERVER_DUB_WAIT_MS)),
     serverDubPresenterQuietMs: Math.floor(positive(env.ROOM_SERVER_DUB_PRESENTER_QUIET_MS, ROOMS_DEFAULTS.SERVER_DUB_PRESENTER_QUIET_MS)),
-    serverDubSteady: ['1', 'true', 'on', 'yes'].includes((env.ROOM_DUB_STEADY ?? '').trim().toLowerCase()),
   };
 }

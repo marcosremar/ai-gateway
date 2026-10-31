@@ -242,7 +242,7 @@ describe('pocketTts', () => {
   });
 });
 
-describe('ROOM_DUB_STEADY: every voice keeps up with the speaker without skipping lines', () => {
+describe('realtime dubbing (steadyDub): every voice keeps up with the speaker without skipping lines', () => {
   const RATE = 24_000;
   const loud = (seconds: number) => {
     const pcm = Buffer.alloc(RATE * seconds * 2);
@@ -258,11 +258,19 @@ describe('ROOM_DUB_STEADY: every voice keeps up with the speaker without skippin
   const long = 'nous allons maintenant parler des chiffres du trimestre et de la croissance';
   let condense: ReturnType<typeof vi.fn<(text: string, lang: string) => Promise<string>>>;
 
+  let steadyOn = false;
+  const steadyRoom = async (languages: string[]): Promise<LiveRoom> => {
+    const r = await room(languages);
+    if (steadyOn) await service.update(r, { steadyDub: true });
+    return r;
+  };
+
   function steadyService(steady: boolean): RoomService {
+    steadyOn = steady;
     service.stop();
     condense = vi.fn(async () => 'chiffres du trimestre et croissance');
     return new RoomService({
-      config: { ...roomsConfigFromEnv({ ROOM_DUB_STEADY: steady ? '1' : '' }), dir: null, serverDubWaitMs: WAIT, serverDubPresenterQuietMs: 60_000 },
+      config: { ...roomsConfigFromEnv({}), dir: null, serverDubWaitMs: WAIT, serverDubPresenterQuietMs: 60_000 },
       store: new MemoryRoomStore(), sweepIntervalMs: 0, log, synthesize: kokoro,
       pocket: { synthesize: pocket, available: () => true }, condense,
     });
@@ -274,22 +282,31 @@ describe('ROOM_DUB_STEADY: every voice keeps up with the speaker without skippin
     expect(spokenText('En 2020, 14 personnes.')).toBe('En 2020, 14 personnes.');
   });
 
-  it('is off unless ROOM_DUB_STEADY is set', () => {
-    expect(roomsConfigFromEnv({}).serverDubSteady).toBe(false);
-    expect(roomsConfigFromEnv({ ROOM_DUB_STEADY: '1' }).serverDubSteady).toBe(true);
+  it('is off until the room asks for it, and the open pages get the new queue', async () => {
+    service = steadyService(false);
+    const r = await room(['fr']);
+    const fr = viewer('fr');
+    service.addViewer(r, fr);
+    expect(r.meta.steadyDub).toBeUndefined();
+    await service.update(r, { steadyDub: true });
+    expect(r.meta.steadyDub).toBe(true);
+    expect(fr.msgs.at(-1)).toMatchObject({ type: 'update', dubBacklogS: 600 });
+    await service.update(r, { steadyDub: false });
+    expect(r.meta.steadyDub).toBeUndefined();
+    expect(fr.msgs.at(-1)).toMatchObject({ type: 'update', dubBacklogS: 6 });
   });
 
   it('lets the page keep every clip only with the flag', async () => {
     service = steadyService(true);
-    expect(service.publicView(await room(['fr'])).dubBacklogS).toBe(600);
+    expect(service.publicView(await steadyRoom(['fr'])).dubBacklogS).toBe(600);
     service = steadyService(false);
-    expect(service.publicView(await room(['fr'])).dubBacklogS).toBeUndefined();
+    expect(service.publicView(await steadyRoom(['fr'])).dubBacklogS).toBeUndefined();
   });
 
   it('trims the silence around a Pocket clip', async () => {
     service = steadyService(true);
     pocket.mockResolvedValue({ audio: withSilence(3), format: 'wav' });
-    const r = await room(['fr']);
+    const r = await steadyRoom(['fr']);
     const fr = viewer('fr');
     service.addViewer(r, fr);
     await service.publishLine(r, line(1));
@@ -300,7 +317,7 @@ describe('ROOM_DUB_STEADY: every voice keeps up with the speaker without skippin
   it('rewrites a line longer than its speech time, for the voice only, and speeds Pocket up when behind', async () => {
     service = steadyService(true);
     pocket.mockResolvedValue({ audio: loud(10), format: 'wav' });
-    const r = await room(['fr']);
+    const r = await steadyRoom(['fr']);
     const fr = viewer('fr');
     service.addViewer(r, fr);
     await service.publishLine(r, line(1));
@@ -316,7 +333,7 @@ describe('ROOM_DUB_STEADY: every voice keeps up with the speaker without skippin
   it('a line that fits its speech time is voiced whole, and a failed rewrite voices the full text', async () => {
     service = steadyService(true);
     pocket.mockResolvedValue({ audio: loud(1), format: 'wav' });
-    const r = await room(['fr']);
+    const r = await steadyRoom(['fr']);
     const fr = viewer('fr');
     service.addViewer(r, fr);
     await service.publishLine(r, { ...line(1, { fr: long }), speechMs: 6_000 });
@@ -333,7 +350,7 @@ describe('ROOM_DUB_STEADY: every voice keeps up with the speaker without skippin
     let release: (clip: TtsClip) => void = () => {};
     pocket.mockImplementationOnce(() => new Promise<TtsClip>(resolve => { release = resolve; }));
     pocket.mockResolvedValue({ audio: loud(1), format: 'wav' });
-    const r = await room(['fr']);
+    const r = await steadyRoom(['fr']);
     const fr = viewer('fr');
     service.addViewer(r, fr);
     for (let id = 1; id <= 7; id++) await service.publishLine(r, line(id));
@@ -349,7 +366,7 @@ describe('ROOM_DUB_STEADY: every voice keeps up with the speaker without skippin
   it('without the flag: same audio as before, nothing shortened', async () => {
     service = steadyService(false);
     pocket.mockResolvedValue({ audio: loud(10), format: 'wav' });
-    const r = await room(['fr']);
+    const r = await steadyRoom(['fr']);
     const fr = viewer('fr');
     service.addViewer(r, fr);
     await service.publishLine(r, line(1));

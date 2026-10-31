@@ -411,8 +411,8 @@ export interface TtsStreamOptions {
   deliver: (id: number, clip: TtsClip, streamed: boolean) => boolean;
   deliverChunk?: (id: number, pcm: Buffer, seq: number) => boolean;
   dropped: (id: number) => void;
-  /** Never drops: from `TTS_MERGE_AFTER_MS` of queue (or a full line) the waiting sentences go out as one. */
-  mergesWaiting?: boolean;
+  /** Read at each sentence. True = never drops: from `TTS_MERGE_AFTER_MS` of queue (or a full line) the waiting sentences go out as one. */
+  mergesWaiting?: () => boolean;
   now: () => number;
   /** Calls at once, read before each start (default TTS_MAX_PARALLEL): 1 for a provider that speaks one sentence at a time. */
   maxParallel?: () => number;
@@ -438,7 +438,7 @@ export class TtsStream {
   push(id: number, readyAt: number): void {
     this.waiting.push({ id, readyAt });
     this.waiting.sort((a, b) => a.id - b.id);
-    if (!this.opts.mergesWaiting && this.waiting.length > TTS_MAX_WAITING) this.opts.dropped(this.waiting.shift()!.id);
+    if (!this.opts.mergesWaiting?.() && this.waiting.length > TTS_MAX_WAITING) this.opts.dropped(this.waiting.shift()!.id);
     this.pump();
   }
 
@@ -474,7 +474,7 @@ export class TtsStream {
   }
 
   private mergeable(queuedMs: number): number[] {
-    if (!this.opts.mergesWaiting || this.waiting.length < 2) return [];
+    if (!this.opts.mergesWaiting?.() || this.waiting.length < 2) return [];
     if (queuedMs < TTS_MERGE_AFTER_MS && this.waiting.length <= TTS_MAX_WAITING) return [];
     return this.waiting.splice(0, this.waiting.length - 1).map(w => w.id);
   }

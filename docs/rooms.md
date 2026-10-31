@@ -89,7 +89,7 @@ OpenRouter (`OPENROUTER_API_KEY`, mp3, ~$0.62 per million characters). Code: `sr
   on Kokoro: 1.3 → 18 % shorter. Simulated on a real 2 h room (593 lines, Kokoro 15 chars/s): dropped sentences on the
   page 13.5 % (6 s cap, no speed-up) → 0.2 % (25 s cap), voice delay p50 2.6 → 4.0 s, p95 10.5 → 15.0 s (long
   sentences dominate: a 300-character line is a 20 s clip).
-- `ROOM_DUB_STEADY=1` (off by default): the catch-up reaches every voice, not only Kokoro — Pocket and the cloned voice
+- Realtime dubbing, a per-room option (`PATCH {"steadyDub": true}`, the app's Advanced → "Dublagem em tempo real", off by default): the catch-up reaches every voice, not only Kokoro — Pocket and the cloned voice
   have no speed, so their audio is time-stretched by the same `catchUpSpeed` (`PcmStretcher`, WSOLA: 40 ms windows,
   same pitch, works on the stream as it arrives); Pocket and Kokoro clips lose their leading/trailing silence like the
   clone already did (`trimClip`, 200 ms kept); and no line is dropped (user decision 2026-10-30: the listener gets all the meaning, not the exact words). What is voiced is rewritten to fit

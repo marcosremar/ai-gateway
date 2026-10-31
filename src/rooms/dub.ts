@@ -89,10 +89,8 @@ export interface RoomDubberOptions {
   deliver: (room: LiveRoom, lineId: number, lang: string, clip: TtsClip, streamed: boolean) => void;
   deliverChunk: (room: LiveRoom, lineId: number, lang: string, pcm: Buffer, seq: number) => void;
   translate?: RoomTranslate;
-  /** Says a text in fewer characters, keeping its whole meaning (never the subtitle); only with `steady`. */
+  /** Says a text in fewer characters, keeping its whole meaning (never the subtitle); only in a `steadyDub` room. */
   condense?: RoomCondense;
-  /** No line lost: voices fit the speech time, waiting lines merge, every voice catches up, silence trimmed. */
-  steady?: boolean;
   addTranslation: (room: LiveRoom, lineId: number, lang: string, text: string) => void;
   /** Wait after a line before voicing it, so the presenter's own clip can arrive first. */
   waitMs: number;
@@ -229,7 +227,7 @@ export class RoomDubber {
       stream: new TtsStream({
         now: this.opts.now,
         synthesize: (lineId, speed, merged) => this.voice(room, s, lang, ls, lineId, speed, merged),
-        mergesWaiting: this.opts.steady,
+        mergesWaiting: () => room.meta.steadyDub === true,
         deliver: (lineId, clip, streamed) => {
           // Re-check: the presenter may have voiced it meanwhile, the listeners may be gone.
           if (!this.stillWanted(room, s, lineId, lang)) return false;
@@ -266,7 +264,7 @@ export class RoomDubber {
       const texts = await Promise.all(lines.map(async line => line.translations[lang]?.trim() || await this.translate(room, line, lang)));
       if (!want.listen) return null;
       const text = texts.map(speakable).join(' ');
-      const voiced = this.opts.steady ? await this.fitted(text, lines, lang) : texts.at(-1)!;
+      const voiced = room.meta.steadyDub ? await this.fitted(text, lines, lang) : texts.at(-1)!;
       return await this.speak(room, s, want.line, speakable(voiced), lang, speed);
     } catch (err) {
       this.opts.log('rooms: server dub failed', { code: room.meta.code, lang, lineId, error: err instanceof Error ? err.message : String(err) });
@@ -292,7 +290,7 @@ export class RoomDubber {
     const voice = this.cloning(room) ? s.voices.get(primary(line.originalLang ?? room.meta.originalLang ?? '')) : undefined;
     if (voice) {
       try {
-        return this.paced({ ...await this.opts.clone!.synthesize(text, lang, voice), engine: 'clone' }, speed);
+        return this.paced(room, { ...await this.opts.clone!.synthesize(text, lang, voice), engine: 'clone' }, speed);
       } catch (err) {
         if (!this.stockSpeaks(lang)) throw err;
         this.opts.log('rooms: voice clone failed, stock voice instead', { code: room.meta.code, lang, lineId: line.id, error: errorText(err) });
@@ -301,21 +299,21 @@ export class RoomDubber {
     if (this.pocketSpeaks(lang)) {
       try {
         // No speed: Pocket has none (see pocketTts) — the speaker's pace and the catch-up apply to Kokoro only.
-        return this.paced(this.trimmed({ ...await this.opts.pocket!.synthesize(text, lang), engine: 'pocket' }), speed);
+        return this.paced(room, this.trimmed(room, { ...await this.opts.pocket!.synthesize(text, lang), engine: 'pocket' }), speed);
       } catch (err) {
         if (!kokoroVoice(lang)) throw err;
         this.opts.log('rooms: Pocket failed, Kokoro instead', { code: room.meta.code, lang, lineId: line.id, error: errorText(err) });
       }
     }
-    return this.trimmed({ ...await this.opts.synthesize(text, lang, pacedSpeed(speed, line)), engine: 'kokoro' });
+    return this.trimmed(room, { ...await this.opts.synthesize(text, lang, pacedSpeed(speed, line)), engine: 'kokoro' });
   }
 
-  private trimmed(clip: TtsClip): TtsClip {
-    return this.opts.steady ? trimClip(clip) : clip;
+  private trimmed(room: LiveRoom, clip: TtsClip): TtsClip {
+    return room.meta.steadyDub ? trimClip(clip) : clip;
   }
 
-  private paced(clip: TtsClip, speed: number): TtsClip {
-    return this.opts.steady ? stretchClip(clip, speed) : clip;
+  private paced(room: LiveRoom, clip: TtsClip, speed: number): TtsClip {
+    return room.meta.steadyDub ? stretchClip(clip, speed) : clip;
   }
 
   private async translate(room: LiveRoom, line: RoomLine, lang: string): Promise<string> {

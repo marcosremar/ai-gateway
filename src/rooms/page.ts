@@ -1118,6 +1118,7 @@ function connect(){
     else if(m.type==='audio')onAudio(m);
     else if(m.type==='audio-chunk')onAudioChunk(m);
     else if(m.type==='update'){if(room)room.youtubeUrl=m.youtubeUrl;applyYoutube(m.youtubeUrl);
+      if(room&&m.dubBacklogS)room.dubBacklogS=m.dubBacklogS;
       if(room&&m.dubLangs){room.dubLangs=m.dubLangs;room.listenLangs=m.listenLangs;buildSelect();updateDubButton()}}
     else if(m.type==='ended')showEnded();};
   s.onclose=function(){if(ping)clearInterval(ping);if(ws===s)ws=null;if(ended||gone)return;
