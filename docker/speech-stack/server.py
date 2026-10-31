@@ -69,6 +69,7 @@ from faster_whisper import WhisperModel
 
 from stt_batch import SttBatcher
 from stt_stream import SttStream
+from mt import MODELS as MT_MODELS, Translator
 from tts_engines import ENGINES, EngineManager, engine_of
 
 TTS_URL = "http://127.0.0.1:8091"
@@ -86,7 +87,15 @@ TTS_PID_FILE = os.environ.get("TTS_PID_FILE", "/tmp/aigw-tts.pid")
 BASE_PYTHON = os.environ.get("BASE_PYTHON", "python3")
 TTS_MODEL = os.environ.get("TTS_MODEL", "Qwen/Qwen3-TTS-12Hz-0.6B-Base")
 STT_MODEL = os.environ.get("STT_MODEL", "large-v3")
-MODELS = {"stt": STT_MODEL, "llm": os.environ.get("LLM_FILE", "llm"), "tts": TTS_MODEL}
+LLM_ON = os.environ.get("LLM_ENGINE", "llama").strip().lower() != "off"
+MT_DIR = Path(os.environ.get("MT_DIR", "/models/mt"))
+MT_NAMES = [n for n in os.environ.get("MT_MODELS", ",".join(MT_MODELS)).split(",") if n and (MT_DIR / n).is_dir()]
+MT_GPU_COMPUTE = os.environ.get("MT_GPU_COMPUTE", "int8_float16")
+MT_CPU_THREADS = int(os.environ.get("MT_CPU_THREADS", "2"))
+MT_BEAM = int(os.environ.get("MT_BEAM", "1"))
+STAGE_NAMES = ("stt", *(("llm",) if LLM_ON else ()), *(("mt",) if MT_NAMES else ()), "tts")
+MODELS = {"stt": STT_MODEL, **({"llm": os.environ.get("LLM_FILE", "llm")} if LLM_ON else {}), **({"mt": MT_NAMES} if MT_NAMES else {}),
+          "tts": TTS_MODEL}
 STT_BEAM = int(os.environ.get("STT_BEAM", "1"))
 # Utterances arriving within STT_BATCH_WINDOW_MS share one GPU pass, up to STT_BATCH clips (stt_batch.py). L4: 4,
 # L40S: 8 — the batch's encoder activations must fit next to the TTS and the LLM.
@@ -115,12 +124,13 @@ FILES = Path("/files")
 STT_COMPUTE = os.environ.get("STT_COMPUTE", "float16")
 # Loaded by boot() (a background task), never at import: uvicorn answers /health at once with each stage's status.
 stt_batcher: SttBatcher | None = None
+translator: Translator | None = None
 client = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=5.0), limits=httpx.Limits(max_connections=64))
 voices: dict[str, dict] = {}
 ready = {"ok": False, "detail": "starting"}
 # Boot of each stage (boot()): waiting → loading → warming → loaded | failed, with the seconds since the process started.
 BOOT_T0 = time.monotonic()
-stages: dict[str, dict] = {name: {"status": "waiting", "at_s": 0.0} for name in ("stt", "llm", "tts")}
+stages: dict[str, dict] = {name: {"status": "waiting", "at_s": 0.0} for name in STAGE_NAMES}
 turns = {"started": 0, "done": 0, "failed": {}, "stalled": {}}
 kokoro_state: dict = {"status": "unloaded"}
 kokoro_engine = None
@@ -888,7 +898,21 @@ async def proxy(request: Request, url: str, stage: str):
 
 @app.post("/v1/chat/completions")
 async def chat(request: Request):
+    if not LLM_ON:
+        return openai_error(503, "llm_off", "this replica serves no LLM (LLM_ENGINE=off)")
     return await proxy(request, f"{LLM_URL}/v1/chat/completions", "chat")
+
+
+@app.post("/v1/translate")
+async def translate(request: Request):
+    if translator is None:
+        return openai_error(503, "mt_not_loaded", f"mt is {stages.get('mt', {}).get('status', 'off')}")
+    body = await request.json()
+    text, source, target = str(body.get("text", "")), str(body.get("source", ""))[:2], str(body.get("target", ""))[:2]
+    try:
+        return JSONResponse(await asyncio.to_thread(translator.translate, text, source, target))
+    except KeyError as error:
+        return openai_error(400, "unsupported_pair", str(error.args[0]))
 
 
 @app.post("/v1/audio/speech")
@@ -1224,7 +1248,7 @@ async def debug_gpu(request: Request):
 @app.get("/health")
 async def health():
     return JSONResponse({**ready, "models": MODELS, "stages": stages, "stt": stt_batcher.stats if stt_batcher else {},
-                         "tts": tts_manager.view(), "s2s": turns, "proxy": proxied,
+                         "tts": tts_manager.view(), "mt": translator.stats if translator else {}, "watchdog": watchdog, "s2s": turns, "proxy": proxied,
                          "kokoro": {k: v for k, v in kokoro_state.items() if k != "voices"}}, status_code=200 if ready["ok"] else 503)
 
 
@@ -1288,6 +1312,23 @@ async def boot_llm() -> None:
     stage("llm", "loaded")
 
 
+def load_mt_sync() -> Translator:
+    return Translator(MT_DIR, MT_NAMES, gpu_compute=MT_GPU_COMPUTE, cpu_threads=MT_CPU_THREADS, beam=MT_BEAM)
+
+
+async def boot_mt() -> None:
+    global translator
+    if STT_AFTER_TTS and TTS_BOOT == "qwen":
+        stage("mt", "waiting", "for the TTS engine (GPU memory order)")
+        await engine_up(f"{TTS_URL}/health")
+    stage("mt", "loading", ", ".join(MT_NAMES))
+    loaded = await asyncio.to_thread(load_mt_sync)
+    stage("mt", "warming")
+    await asyncio.to_thread(loaded.translate, "Bom dia a todos.", "pt", "en")
+    translator = loaded
+    stage("mt", "loaded")
+
+
 async def boot_tts() -> None:
     stage("tts", "loading", "reference voices")
     await asyncio.to_thread(load_voices)
@@ -1332,8 +1373,9 @@ async def boot() -> None:
             print("boot", name, "failed", repr(error)[:300], flush=True)
             raise
 
-    results = await asyncio.gather(run("stt", boot_stt), run("llm", boot_llm), run("tts", boot_tts), return_exceptions=True)
-    failed = [(name, error) for name, error in zip(("stt", "llm", "tts"), results) if isinstance(error, BaseException)]
+    steps = {"stt": boot_stt, "llm": boot_llm, "mt": boot_mt, "tts": boot_tts}
+    results = await asyncio.gather(*(run(name, steps[name]) for name in STAGE_NAMES), return_exceptions=True)
+    failed = [(name, error) for name, error in zip(STAGE_NAMES, results) if isinstance(error, BaseException)]
     if failed:
         ready.update(ok=False, detail=f"warm failed: {failed[0][0]}: {failed[0][1]!r}"[:300])
     else:
@@ -1349,6 +1391,38 @@ tts_manager = EngineManager({name: {"qwen": qwen_engine, "kokoro": KokoroEngine(
                             switch_idle_s=TTS_SWITCH_IDLE_S, log=lambda line: print(line, flush=True))
 
 
+TTS_WATCH_S = float(os.environ.get("TTS_WATCH_S", "10"))
+TTS_WATCH_MISSES = int(os.environ.get("TTS_WATCH_MISSES", "3"))
+watchdog = {"restarts": 0, "misses": 0, "last_restart_s": None, "last_error": None}
+
+
+async def restart_dead_tts() -> None:
+    while True:
+        await asyncio.sleep(TTS_WATCH_S)
+        if not ready["ok"] or tts_manager.active != "qwen" or not tts_manager.loaded("qwen"):
+            continue
+        if await qwen_engine.answering():
+            watchdog["misses"] = 0
+            continue
+        watchdog["misses"] += 1
+        if watchdog["misses"] < TTS_WATCH_MISSES:
+            continue
+        print("watchdog: vLLM-Omni stopped answering, restarting it", flush=True)
+        tts_manager.set("qwen", "loading", "restarted by the watchdog")
+        try:
+            await qwen_engine.unload()
+        except Exception as error:  # noqa: BLE001
+            print("watchdog: stop", repr(error), flush=True)
+        try:
+            await qwen_engine.load()
+            tts_manager.mark_loaded("qwen")
+            watchdog.update(restarts=watchdog["restarts"] + 1, misses=0, last_restart_s=round(time.monotonic() - BOOT_T0, 1))
+        except Exception as error:  # noqa: BLE001
+            watchdog["last_error"] = repr(error)[:300]
+            tts_manager.set("qwen", "failed", repr(error))
+
+
 @app.on_event("startup")
 async def startup() -> None:
     asyncio.create_task(boot())
+    asyncio.create_task(restart_dead_tts())

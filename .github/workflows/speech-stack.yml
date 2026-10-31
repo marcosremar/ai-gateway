@@ -12,6 +12,7 @@ on:
       - 'docker/speech-stack/**'
       - '!docker/speech-stack/README.md'
       - '!docker/speech-stack/bench.py'
+      - '!docker/speech-stack/realtime_check.py'
       - '!docker/speech-stack/test_*.py'
       - '.github/workflows/speech-stack.yml'
   pull_request:
@@ -20,6 +21,7 @@ on:
       - 'docker/speech-stack/**'
       - '!docker/speech-stack/README.md'
       - '!docker/speech-stack/bench.py'
+      - '!docker/speech-stack/realtime_check.py'
       - '!docker/speech-stack/test_*.py'
       - '.github/workflows/speech-stack.yml'
 

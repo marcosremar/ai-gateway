@@ -10,6 +10,25 @@ sent to the TTS at once, so the student hears the first words before the reply i
 | TTS | Qwen3-TTS 12Hz 0.6B Base (voice cloning) | vLLM-Omni 0.28.0, streaming PCM |
 | TTS (per request) | Kokoro-82M v1.0, ONNX fp32, 54 stock voices | kokoro-onnx 0.6.1 + espeak-ng, **CPU**, in the orchestrator |
 
+**Small cards without the LLM (2026-10-30):** `LLM_ENGINE=off` starts no llama.cpp (`/v1/chat/completions` answers 503
+`llm_off`) and the card holds Whisper (streaming), OPUS-MT and Qwen3-TTS. `POST /v1/translate {text, source, target}` →
+`{text, model, device, ms}` (`mt.py`): OPUS-MT tc-bible-big as CTranslate2 (`en-itc`, `roa-en`, `itc-multi`, `gem-multi`,
+the app's own pairs; 400 `unsupported_pair` otherwise), `int8_float16` on the GPU with an `int8` copy on the CPU that
+answers when the GPU call fails (`/health` `mt.cpu_calls`). Each source sentence ends with `</s>`: without it CTranslate2's
+Marian never sees the end and repeats ("And And And…"). Under 16 GB of GPU, Whisper runs `int8_float16` with `STT_BATCH=2`
+(fp16 large-v3 ran out of memory next to the TTS on 11 GB). A watchdog restarts vLLM-Omni when it stops answering
+`TTS_WATCH_MISSES` (3) checks `TTS_WATCH_S` (10 s) apart (`/health` `watchdog`). vLLM-Omni 0.28.0 is patched so the prompt
+embeddings follow the model dtype: on a card without bf16 (RTX 2080 Ti) every `ref_audio` request killed the engine.
+
+`realtime_check.py <fixtures>` (run next to the replica, `--per-language N`) plays FLEURS speakers in real time through
+`/ws/audio-stream`, translates each final with `/v1/translate` and voices it with the speaker's own clip as `ref_audio`
+(`x_vector_only_mode`, as the gateway sends it) while the next one streams; scores STT WER, chrF, TTS first audio and real
+time factor, Whisper's WER on the dub, ECAPA similarity to the speaker vs the other speakers, and speech end → first dubbed
+audio; `realtime_dub` = no errors, that lag ≤ 3 s at p90 and synthesis ≤ 0.8 × the speech. RTX 2080 Ti 11 GB (Vast, Norway,
+US$ 0.086/h), 24 clips pt/fr/en → en/pt/fr: STT WER 7.3 %, final 0.64 s after the speech (p90 0.91), chrF 69.4 in 73 ms,
+TTS first audio 112 ms, RTF 0.55, dub WER 2.0 %, similarity 0.51 own vs 0.12 others, speech end → dub 0.82 s (p90 1.09),
+`realtime_dub: true`; vLLM-Omni killed → back by itself in 136 s.
+
 `/v1/s2s` config may carry `response_format` (passed to llama.cpp) and `speak_field`: then only that field of the JSON
 answer is voiced, as it streams, and `done.reply_raw` has the whole JSON (`JsonField`, tests in `test_json_field.py`).
 
@@ -318,3 +337,5 @@ engines' processes get the environment `start.sh` had before it added `/opt/wenv
 
 Tests: `test_tts_engines.py` (switch rules, drain, failures), `test_pocket_vendored.py` (the sidecar with a fake model,
 vendored copies identical), `test_kokoro.py` (the speech route refuses another engine with 503).
+
+RTX 3060 12 GB (2026-10-30, 24 clips, boot 4–8 min on a fresh host): 0 errors, STT WER 7.6 %, final 0.9 s, chrF 67.4 in 78 ms, first TTS audio 102 ms, RTF 0.27, dub WER 1.4 %, voice similarity 0.51 vs 0.12, speech end to dub 1.09 s p50 / 1.39 s p90, GPU 10.5 of 12.3 GB. Below 16 GB `start.sh` always uses `int8_float16`: the image's `STT_COMPUTE=float16` filled the card and CTranslate2 reported it as `invalid device ordinal`.
